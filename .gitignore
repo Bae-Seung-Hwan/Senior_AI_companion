@@ -1,0 +1,32 @@
+# 비밀 값
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+google-services.json
+GoogleService-Info.plist
+
+# 의존성 / 빌드
+node_modules/
+build/
+dist/
+.gradle/
+*.apk
+*.aab
+*.ipa
+Pods/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# 로그
+*.log

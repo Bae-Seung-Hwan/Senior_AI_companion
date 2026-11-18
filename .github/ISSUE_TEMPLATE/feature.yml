@@ -1,0 +1,42 @@
+name: 기능 요청
+description: 새 기능이나 작업 단위를 등록합니다
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: owner
+    attributes:
+      label: 담당
+      options:
+        - A (말벗 AI)
+        - B (사람 연결)
+        - 공통
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: 목표
+      description: 사용자(어르신/보호자)가 무엇을 할 수 있게 되나요?
+      placeholder: 어르신이 "내일 3시에 치과 가야 해"라고 말하면 할 일로 등록된다
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 만드는 범위 (화면 + 서버)
+      placeholder: |
+        - [ ] 화면
+        - [ ] API
+        - [ ] 저장
+    validations:
+      required: true
+  - type: textarea
+    id: contracts
+    attributes:
+      label: 연결 지점
+      description: 상대방 기능과 주고받는 API가 있으면 적어주세요 (docs/api-contracts.md 번호)
+  - type: textarea
+    id: done
+    attributes:
+      label: 완료 조건
+      placeholder: 음성으로 등록한 할 일이 목록에 보이고, 시간이 되면 음성 알림이 온다
