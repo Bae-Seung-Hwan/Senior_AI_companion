@@ -30,3 +30,6 @@ Thumbs.db
 
 # 로그
 *.log
+
+# LLM 벤치 결과 (개인 실행 기록)
+tools/llm-bench/results/
