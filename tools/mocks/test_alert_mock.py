@@ -1,0 +1,150 @@
+"""긴급 알림 mock 테스트.  실행: python -m unittest discover tools/mocks"""
+
+import contextlib
+import io
+import json
+import threading
+import unittest
+import urllib.error
+import urllib.request
+import uuid
+from datetime import datetime
+from http.server import ThreadingHTTPServer
+
+from alert_mock import KST, ApiError, Store, make_handler
+
+NOW = datetime(2026, 11, 22, 14, 5, 20, tzinfo=KST)
+EVIDENCE = "아들이 휴대폰이 고장 났다고 문자로 급하게 300만원만 보내달래요."
+
+PUSH = {"guardian_id": "g_01", "channel": "push", "status": "sent"}
+ALIMTALK = {"guardian_id": "g_01", "channel": "alimtalk", "status": "queued"}
+
+
+def req(**over):
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "user_id": "u_123",
+        "type": "fraud",
+        "severity": "high",
+        "reason": "가족을 사칭해 급하게 송금을 요구하는 메신저 피싱 의심",
+        "evidence": {"text": EVIDENCE, "conversation_id": "c_456", "message_id": "m_801"},
+        "user_response": "guardian_check_requested",
+        "detected_at": "2026-11-22T14:05:12+09:00",
+    }
+    body.update(over)
+    return body
+
+
+class StoreTest(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(clock=lambda: NOW)
+
+    def create(self, **over):
+        return self.store.create(req(**over))
+
+    def error_code(self, **over):
+        with self.assertRaises(ApiError) as ctx:
+            self.create(**over)
+        return ctx.exception.status, ctx.exception.code
+
+    def test_high는_푸시와_알림톡(self):
+        status, resp = self.create()
+        self.assertEqual(status, 202)
+        self.assertEqual(resp, {"alert_id": "al_001", "deliveries": [PUSH, ALIMTALK]})
+
+    def test_medium은_푸시만(self):
+        _, resp = self.create(type="emergency", severity="medium", user_response="no_response")
+        self.assertEqual(resp["deliveries"], [PUSH])
+
+    def test_dismissed면_medium으로_낮춰서_보냄(self):
+        _, resp = self.create(user_response="dismissed")
+        self.assertEqual(resp["deliveries"], [PUSH])
+        saved = self.store.list()[0]
+        self.assertEqual((saved["severity"], saved["requested_severity"]), ("medium", "high"))
+
+    def test_같은_request_id는_처음_응답_그대로(self):
+        body = req()
+        first = self.store.create(body)
+        again = self.store.create({**body, "severity": "medium"})
+        self.assertEqual(again, first)
+        self.assertEqual(len(self.store.list()), 1)
+
+    def test_보호자_없으면_빈_deliveries(self):
+        status, resp = self.create(user_id="u_no_guardian")
+        self.assertEqual((status, resp["deliveries"]), (202, []))
+
+    def test_오류_코드(self):
+        self.assertEqual(self.error_code(user_id="u_unknown"), (404, "USER_NOT_FOUND"))
+        bad_cases = [
+            {"request_id": "abc"},
+            {"user_id": ""},
+            {"type": "health"},
+            {"severity": "low"},
+            {"reason": " "},
+            {"evidence": None},
+            {"evidence": {"conversation_id": "c_456"}},
+            {"user_response": "ok"},
+            {"detected_at": "어제"},
+            {"detected_at": "2026-11-22T14:05:12"},  # 시간대 없음
+        ]
+        for over in bad_cases:
+            with self.subTest(over=over):
+                self.assertEqual(self.error_code(**over), (400, "INVALID_REQUEST"))
+
+    def test_오류는_저장하지_않음(self):
+        body = req(type="")
+        with self.assertRaises(ApiError):
+            self.store.create(body)
+        status, _ = self.store.create({**body, "type": "fraud"})
+        self.assertEqual(status, 202)
+        self.assertEqual(len(self.store.list()), 1)
+
+
+class HttpTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Store(clock=lambda: NOW)))
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def call(self, method, path, body=None, headers=None):
+        data = json.dumps(body).encode() if body is not None else None
+        r = urllib.request.Request(self.base + path, data=data, method=method,
+                                   headers={"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(r) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def test_알림_후_목록에_보임(self):
+        status, resp = self.call("POST", "/alerts", req(user_id="u_http"))
+        self.assertEqual(status, 202)
+        _, listed = self.call("GET", "/alerts?user_id=u_http")
+        self.assertEqual([a["alert_id"] for a in listed["alerts"]], [resp["alert_id"]])
+
+    def test_오류_형식(self):
+        status, resp = self.call("POST", "/alerts", req(user_id="u_unknown"))
+        self.assertEqual(status, 404)
+        self.assertEqual(resp["error"]["code"], "USER_NOT_FOUND")
+        self.assertIn("message", resp["error"])
+
+    def test_가짜_장애_헤더(self):
+        status, resp = self.call("POST", "/alerts", req(), headers={"X-Mock-Fail": "503"})
+        self.assertEqual((status, resp["error"]["code"]), (503, "MOCK_FAILURE"))
+
+    def test_로그에_근거_발화를_남기지_않음(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.call("POST", "/alerts", req())
+            self.call("POST", "/alerts", req(severity="low"))
+        self.assertIn("/alerts", out.getvalue())
+        self.assertNotIn(EVIDENCE, out.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
