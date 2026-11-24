@@ -6,7 +6,12 @@ A 대화 기록 저장(#18)이 생기기 전이라, 하루치 대화를 JSON 파
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from dataclasses import dataclass, field
+
+from ..clock import KST
+
+log = logging.getLogger(__name__)
 
 SECTIONS = ("schedule", "health", "mood")
 MOOD_LEVELS = ("good", "normal", "low")
@@ -39,21 +44,28 @@ class DayLog:
     def senior_turn_count(self) -> int:
         return sum(1 for c in self.conversations for t in c.turns if t.speaker == SENIOR)
 
+    @property
+    def conversation_count(self) -> int:
+        """어르신이 한 마디라도 한 대화 수. 답이 없던 AI 안부 인사는 세지 않는다."""
+        return sum(1 for c in self.conversations if any(t.speaker == SENIOR for t in c.turns))
+
     @classmethod
     def from_dict(cls, data: dict) -> DayLog:
-        return cls(
-            user_id=data["user_id"],
-            date=dt.date.fromisoformat(data["date"]),
-            completed_todos=data.get("completed_todos"),
-            conversations=tuple(
-                Conversation(
-                    conversation_id=c["conversation_id"],
-                    started_at=_aware(c["started_at"]),
-                    turns=tuple(Turn(t["speaker"], t["text"], _aware(t["at"])) for t in c["turns"]),
-                )
-                for c in data.get("conversations", [])
-            ),
-        )
+        day = dt.date.fromisoformat(data["date"])
+        conversations = []
+        for c in data.get("conversations", []):
+            conv = Conversation(
+                conversation_id=c["conversation_id"],
+                started_at=_aware(c["started_at"]),
+                turns=tuple(Turn(t["speaker"], t["text"], _aware(t["at"])) for t in c["turns"]),
+            )
+            # 대화가 시작된 날(한국 시간)로 날짜를 정한다 (명세 6 대화 횟수와 같은 기준). 다른 날 대화는 뺀다
+            if conv.started_at.astimezone(KST).date() != day:
+                log.warning("다른 날짜의 대화를 뺌: %s", conv.conversation_id)
+                continue
+            conversations.append(conv)
+        return cls(user_id=data["user_id"], date=day, completed_todos=data.get("completed_todos"),
+                   conversations=tuple(conversations))
 
 
 def _aware(value: str) -> dt.datetime:
@@ -71,7 +83,7 @@ class DailyReport:
 
     def to_request(self, *, request_id: str, day: DayLog, generated_at: dt.datetime) -> dict:
         """명세 3 `POST /guardian-reports/daily` 요청 본문."""
-        stats = {"conversation_count": len(day.conversations)}
+        stats = {"conversation_count": day.conversation_count}
         if day.completed_todos is not None:
             stats["completed_todos"] = day.completed_todos
         return {

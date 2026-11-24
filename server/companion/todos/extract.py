@@ -134,12 +134,14 @@ def to_draft(raw: dict, *, utterance: str, today: dt.date, message_id: str | Non
 
 
 class ClaudeTodoExtractor:
-    def __init__(self, client=None, model: str = DEFAULT_MODEL, effort: str = "low"):
-        if client is None:
-            import anthropic  # 테스트에서는 가짜 client를 넣어서 SDK 없이도 돈다
+    def __init__(self, client=None, model: str = DEFAULT_MODEL, effort: str = "low", api_errors=None):
+        if client is None or api_errors is None:
+            import anthropic  # 테스트에서는 가짜 client와 api_errors를 넣어서 SDK 없이도 돈다
 
-            client = anthropic.Anthropic()
+            client = client or anthropic.Anthropic()
+            api_errors = api_errors or (anthropic.APIError,)
         self.client = client
+        self.api_errors = tuple(api_errors)  # API 오류만 잡고, 프로그래밍 오류는 그대로 터뜨린다
         self.model = model
         self.effort = effort  # 음성 대화라 지연이 중요 → low
 
@@ -162,7 +164,7 @@ class ClaudeTodoExtractor:
                     "format": {"type": "json_schema", "schema": TODO_SCHEMA},
                 },
             )
-        except Exception as e:  # anthropic.APIError 계열. 원문은 로그에 남기지 않는다
+        except self.api_errors as e:  # 원문은 로그에 남기지 않는다
             log.warning("할 일 추출 API 오류: %s", type(e).__name__)
             raise ExtractionError(type(e).__name__) from e
 

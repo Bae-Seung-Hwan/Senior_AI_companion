@@ -5,8 +5,6 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 
-from ..clock import KST  # noqa: F401  (flow·speech가 여기서 가져다 씀)
-
 KINDS = ("appointment", "medication", "task")
 TIME_HINTS = ("morning", "noon", "evening", "bedtime")
 WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")

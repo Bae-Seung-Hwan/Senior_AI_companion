@@ -1,11 +1,13 @@
 import datetime as dt
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from companion.clock import KST
-from companion.reports import guard
+from companion.reports import batch, guard
 from companion.reports.b_client import (
     ACCEPTED,
     ALREADY_SENT,
@@ -14,7 +16,14 @@ from companion.reports.b_client import (
     ReportApi,
     SubmitResult,
 )
-from companion.reports.batch import NO_CONVERSATION, SENT, WRITE_FAILED, run_one
+from companion.reports.batch import (
+    NO_CONVERSATION,
+    SENT,
+    WRITE_FAILED,
+    Outcome,
+    run_file,
+    run_one,
+)
 from companion.reports.models import Conversation, DailyReport, DayLog, Turn
 from companion.reports.writer import ClaudeReportWriter, ReportError, format_transcript
 
@@ -58,7 +67,8 @@ class FakeBetaMessages:
 
 def writer(*responses):
     messages = FakeBetaMessages(*responses)
-    return ClaudeReportWriter(client=SimpleNamespace(beta=SimpleNamespace(messages=messages))), messages
+    client = SimpleNamespace(beta=SimpleNamespace(messages=messages))
+    return ClaudeReportWriter(client=client, api_errors=(ConnectionError,)), messages
 
 
 class ModelsTest(unittest.TestCase):
@@ -84,6 +94,21 @@ class ModelsTest(unittest.TestCase):
             "generated_at": "2026-11-24T20:30:00+09:00",
         })
 
+    def test_다른_날짜_대화는_뺌(self):
+        data = json.loads(SAMPLE.read_text(encoding="utf-8"))
+        data["conversations"][0]["started_at"] = "2026-11-23T23:50:00+09:00"
+        self.assertEqual([c.conversation_id for c in DayLog.from_dict(data).conversations], ["c_102", "c_103"])
+        # UTC로 와도 한국 날짜로 판단 (11-24 14:00 UTC = 11-24 23:00 KST)
+        data["conversations"][0]["started_at"] = "2026-11-24T14:00:00+00:00"
+        self.assertEqual(len(DayLog.from_dict(data).conversations), 3)
+
+    def test_대화_횟수는_어르신이_말한_대화만(self):
+        silent = Conversation("c_9", NOW, (Turn("ai", "좋은 저녁이에요", NOW),))
+        day = sample_day()
+        day = DayLog(day.user_id, day.date, (*day.conversations, silent), day.completed_todos)
+        body = DailyReport("…").to_request(request_id="r", day=day, generated_at=NOW)
+        self.assertEqual(body["stats"]["conversation_count"], 3)
+
     def test_끝낸_할_일_수를_모르면_빼기(self):
         day = DayLog("u_1", dt.date(2026, 11, 24), ())
         body = DailyReport("…").to_request(request_id="r", day=day, generated_at=NOW)
@@ -106,6 +131,13 @@ class GuardTest(unittest.TestCase):
         self.assertIn("치과", guard.mixed_words("health", "치과 치료가 아프지 않았대요."))
         self.assertIn("기뻐", guard.mixed_words("schedule", "치과에 다녀오시고 기뻐하셨어요."))
         self.assertEqual(guard.mixed_words("health", "무릎이 쑤셔서 오래 걷기 힘들다고 하셨어요."), [])
+
+    def test_흔한_낱말에_잘못_걸리지_않음(self):
+        self.assertEqual(guard.brief_problems("스마트폰으로 이야기 나누셨어요."), [])
+        self.assertEqual(guard.mixed_words("health", "기운이 없다고 하셨어요."), [])
+        self.assertEqual(guard.mixed_words("health", "무릎이 걱정된다고 하셨어요."), [])
+        self.assertEqual(guard.mixed_words("mood", "약간 처지셨어요."), [])
+        self.assertIn("마트에", guard.mixed_words("mood", "마트에 다녀오시며 즐거워하셨어요."))
 
     def test_의료_표현(self):
         self.assertEqual(guard.medical_problems("같은 질문을 여러 번 하셨어요."), [])
@@ -152,6 +184,25 @@ class WriterTest(unittest.TestCase):
         self.assertIsNone(report.sections["health"])                  # 의료 표현 section은 뺌
         self.assertEqual(report.sections["mood"], GOOD["sections"]["mood"])
         self.assertEqual(report.mood_level, "low")
+
+    def test_다시_쓰기가_실패해도_첫_결과를_고쳐서_씀(self):
+        mixed = {**GOOD, "sections": {**GOOD["sections"], "mood": "치과 가기 귀찮아하셨어요."}}
+        for second in (reply(GOOD, stop_reason="refusal"), ConnectionError("down"), reply("JSON 아님")):
+            w, _ = writer(reply(mixed), second)
+            report = w.write(sample_day())
+            self.assertIsNone(report.sections["mood"])
+            self.assertEqual(report.sections["schedule"], GOOD["sections"]["schedule"])
+
+    def test_프로그래밍_오류는_그대로_터짐(self):
+        w, _ = writer(TypeError("unexpected keyword 'fallbacks'"))
+        with self.assertRaises(TypeError):
+            w.write(sample_day())
+
+    def test_대화_시각은_한국_시간으로(self):
+        utc = dt.UTC
+        at = dt.datetime(2026, 11, 24, 11, 10, tzinfo=utc)  # 20:10 KST
+        day = DayLog("u_1", dt.date(2026, 11, 24), (Conversation("c_1", at, (Turn("senior", "안녕", at),)),))
+        self.assertIn("20:10 어르신: 안녕", format_transcript(day))
 
     def test_빈_section은_None(self):
         w, _ = writer(reply({**GOOD, "sections": {"schedule": "  ", "health": None, "mood": "편안해하셨어요."}}))
@@ -228,6 +279,54 @@ class BatchTest(unittest.TestCase):
                                (SubmitResult(REJECTED, error_code="INVALID_REQUEST"), REJECTED),
                                (SubmitResult(UNAVAILABLE), UNAVAILABLE)):
             self.assertEqual(self.run_one(api=FakeApi(result)).status, status)
+
+
+class RerunTest(unittest.TestCase):
+    """같은 날짜로 다시 돌릴 때."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_보낸_뒤_다시_돌리면_아무것도_안_함(self):
+        sent = Outcome("u_123", "2026-11-24", SENT, request={"request_id": "rid-1", "brief": "보낸 것"})
+        batch.save(sent, self.out)
+        api, w = FakeApi(), mock.Mock()
+        outcome = run_file(SAMPLE, writer=w, api=api, out_dir=self.out)
+        self.assertEqual(outcome, sent)
+        self.assertEqual((api.bodies, w.write.call_count), ([], 0))
+        self.assertEqual(batch.load(self.out, "u_123", "2026-11-24"), sent)  # 기록이 지워지지 않음
+
+    def test_B가_응답하지_않았으면_같은_본문을_다시_보냄(self):
+        body = {"request_id": "rid-1", "brief": "처음 쓴 요약"}
+        batch.save(Outcome("u_123", "2026-11-24", "unavailable", request=body), self.out)
+        api, w = FakeApi(), mock.Mock()
+        outcome = run_file(SAMPLE, writer=w, api=api, out_dir=self.out)
+        self.assertEqual((outcome.status, api.bodies, w.write.call_count), (SENT, [body], 0))
+        self.assertEqual(batch.load(self.out, "u_123", "2026-11-24").status, SENT)
+
+    def test_쓰기_실패였으면_처음부터_다시(self):
+        batch.save(Outcome("u_123", "2026-11-24", WRITE_FAILED), self.out)
+        api = FakeApi()
+        outcome = run_file(SAMPLE, writer=FakeWriter(DailyReport(GOOD["brief"], GOOD["sections"], "good")),
+                           api=api, out_dir=self.out)
+        self.assertEqual((outcome.status, len(api.bodies)), (SENT, 1))
+
+    def test_입력_파일_하나가_깨져도_나머지는_계속(self):
+        bad = self.out / "bad.json"
+        bad.write_text("{", encoding="utf-8")
+        report = DailyReport(GOOD["brief"], GOOD["sections"], "good")
+        argv = ["batch", str(bad), str(SAMPLE), "--out", str(self.out / "rec")]
+        with (mock.patch.object(batch, "ClaudeReportWriter", return_value=FakeWriter(report)),
+              mock.patch.object(batch, "ReportApi", return_value=FakeApi()),
+              mock.patch("sys.argv", argv), mock.patch("builtins.print"),
+              mock.patch.object(batch.logging, "basicConfig")):
+            code = batch.main()
+        self.assertEqual(code, 1)  # 실패가 있었음을 종료 코드로 알림
+        self.assertEqual(batch.load(self.out / "rec", "u_123", "2026-11-24").status, SENT)
 
 
 class ReportApiTest(unittest.TestCase):

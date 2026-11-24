@@ -31,7 +31,8 @@ class FakeMessages:
 
 def extractor(**kw):
     messages = FakeMessages(**kw)
-    return ClaudeTodoExtractor(client=SimpleNamespace(messages=messages)), messages
+    ex = ClaudeTodoExtractor(client=SimpleNamespace(messages=messages), api_errors=(ConnectionError,))
+    return ex, messages
 
 
 class ToDraftTest(unittest.TestCase):
@@ -98,6 +99,11 @@ class ExtractorTest(unittest.TestCase):
     def test_API_오류는_ExtractionError(self):
         ex, _ = extractor(error=ConnectionError("down"))
         with self.assertRaises(ExtractionError):
+            ex.extract("…", TODAY)
+
+    def test_프로그래밍_오류는_그대로_터짐(self):
+        ex, _ = extractor(error=TypeError("unexpected keyword"))
+        with self.assertRaises(TypeError):
             ex.extract("…", TODAY)
 
 

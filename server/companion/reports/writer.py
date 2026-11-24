@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 
+from ..clock import KST
 from . import guard
 from .models import AI, MOOD_LEVELS, SECTIONS, DailyReport, DayLog
 
@@ -71,9 +72,11 @@ class ReportError(Exception):
 def format_transcript(day: DayLog) -> str:
     lines = [f"날짜: {day.date.isoformat()}", f"대화 {len(day.conversations)}번"]
     for i, conv in enumerate(day.conversations, 1):
-        lines.append(f"\n[대화 {i}] {conv.started_at.strftime('%H:%M')} 시작")
+        # 시각은 한국 시간으로 (UTC로 들어와도 저녁 일을 아침 일로 쓰지 않게)
+        lines.append(f"\n[대화 {i}] {conv.started_at.astimezone(KST).strftime('%H:%M')} 시작")
         for turn in conv.turns:
-            lines.append(f"{turn.at.strftime('%H:%M')} {SPEAKER_KO.get(turn.speaker, turn.speaker)}: {turn.text}")
+            at = turn.at.astimezone(KST).strftime("%H:%M")
+            lines.append(f"{at} {SPEAKER_KO.get(turn.speaker, turn.speaker)}: {turn.text}")
     return "\n".join(lines)
 
 
@@ -97,14 +100,17 @@ def _problems(raw: dict) -> list[str]:
 
 
 class ClaudeReportWriter:
-    def __init__(self, client=None, model: str = DEFAULT_MODEL, effort: str = "medium"):
-        if client is None:
-            import anthropic  # 테스트에서는 가짜 client를 넣어서 SDK 없이도 돈다
+    def __init__(self, client=None, model: str = DEFAULT_MODEL, effort: str = "medium", api_errors=None):
+        if client is None or api_errors is None:
+            import anthropic  # 테스트에서는 가짜 client와 api_errors를 넣어서 SDK 없이도 돈다
 
-            client = anthropic.Anthropic()
+            client = client or anthropic.Anthropic()
+            api_errors = api_errors or (anthropic.APIError,)
         self.client = client
         self.model = model
         self.effort = effort
+        # API 오류만 "요약 실패"로 처리한다. 인자 이름이 틀린 TypeError 같은 프로그래밍 오류는 그대로 터뜨려 원인이 보이게
+        self.api_errors = tuple(api_errors)
 
     def write(self, day: DayLog) -> DailyReport:
         messages = [{"role": "user", "content": format_transcript(day)}]
@@ -118,7 +124,11 @@ class ClaudeReportWriter:
                 {"role": "user", "content": "다음 규칙을 어겼습니다. 고쳐서 JSON 전체를 다시 써 주세요.\n- "
                  + "\n- ".join(problems)},
             ]
-            raw, _ = self._call(messages)
+            try:
+                raw, _ = self._call(messages)
+            except ReportError as e:
+                # 다시 쓰기가 실패해도 그날 요약을 버리지 않고, 첫 결과를 안전하게 고쳐서 보낸다
+                log.warning("하루 요약 다시 쓰기 실패, 첫 결과를 고쳐서 씀: %s", e)
         return self._sanitize(raw)
 
     def _call(self, messages: list[dict]) -> tuple[dict, str]:
@@ -132,7 +142,7 @@ class ClaudeReportWriter:
                 betas=[FALLBACK_BETA],
                 fallbacks="default",
             )
-        except Exception as e:  # anthropic.APIError 계열. 대화 내용은 로그에 남기지 않는다
+        except self.api_errors as e:  # 대화 내용은 로그에 남기지 않는다
             log.warning("하루 요약 API 오류: %s", type(e).__name__)
             raise ReportError(type(e).__name__) from e
         if response.stop_reason in ("refusal", "max_tokens"):
@@ -164,5 +174,7 @@ class ClaudeReportWriter:
                 log.info("하루 요약 %s를 뺌 (다른 항목 내용 또는 의료 표현)", name)
                 value = None
             sections[name] = value or None
+        # mood section을 뺐어도 mood_level은 보낸다. mood_level은 기분 공유 동의 여부로 B가 따로 거르고(명세 3),
+        # "며칠째 low" 판단에도 쓰인다. section을 뺀 이유는 다른 항목 내용이 섞였기 때문이지 기분을 몰라서가 아니다
         mood = raw.get("mood_level") if raw.get("mood_level") in MOOD_LEVELS else "normal"
         return DailyReport(brief=brief, sections=sections, mood_level=mood)
