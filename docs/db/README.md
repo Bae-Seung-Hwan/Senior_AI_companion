@@ -31,7 +31,7 @@ erDiagram
     users ||--o{ user_blocks : "차단"
     users ||--o{ user_reports : "신고"
     users ||--o{ subscriptions : "혜택 받음"
-    users ||--o{ usage_daily : "대화 횟수"
+    users ||--o{ usage_conversations : "대화 기록"
 ```
 
 ## 테이블 한눈에 보기
@@ -56,7 +56,7 @@ erDiagram
 | | `meetups`, `meetup_members` | 모임, 참여자 | #54, #55 |
 | | `user_blocks`, `user_reports` | 차단, 신고 | #56 |
 | 구독 | `subscriptions` | 구독 (혜택 받는 어르신 ≠ 결제자 자녀) | #59~#61 |
-| | `usage_daily` | 하루 대화 횟수 | #58, 명세 6 |
+| | `usage_conversations` + 뷰 `usage_daily` | 대화 기록 (대화 하나에 한 줄, `request_id`로 중복 방지) + 하루 대화 횟수 | #58, 명세 6 |
 
 ## 설계에서 정한 것
 
@@ -77,6 +77,7 @@ erDiagram
 | 매주 반복에는 요일 필요 | `CHECK`로 요일 배열 필수 |
 | 사용자·날짜당 요약 하나 | `daily_reports UNIQUE (user_id, date)` |
 | 한 어르신에게 유효한 구독 하나 | 부분 유니크 인덱스 |
+| 같은 대화를 두 번 세지 않음 (명세 6-2) | `usage_conversations.request_id` PK |
 
 ### 3. 정확한 위치는 저장하지 않음
 모임 매칭은 **행정동 코드(`region_code`)** 단위로 합니다. 좌표가 필요해지면 그때 PostGIS를 검토합니다.
@@ -96,8 +97,15 @@ erDiagram
 ### 7. 보호자 초대는 두 가지 방식
 `guardian_invites.invitee_phone`이 null이면 어르신 폰의 카톡 공유(링크)로 보낸 초대, 값이 있으면 알림톡 "보호자 초대" 템플릿으로 보낸 초대입니다. 가입 전 보호자의 전화번호라서 초대가 쓰이거나 만료되면 지웁니다.
 
-### 8. ID
+### 8. 대화 횟수는 기록에서 셈
+명세 6-2는 같은 `request_id`가 다시 오면 횟수를 늘리지 않아야 합니다. 하루 횟수만 저장하면 어떤 대화를 이미 셌는지 알 수 없어서, **대화마다 한 줄씩 `usage_conversations`에 쌓고 `usage_daily` 뷰로 셉니다.**
+- `date`는 `started_at`을 사용자 시간대로 바꾼 날짜입니다. B 장애 뒤 늦게 기록돼도 대화한 날짜에 들어갑니다 (명세 6)
+- 횟수를 따로 저장하지 않아 기록과 횟수가 어긋날 일이 없습니다. 사용자가 많아져 세는 게 느려지면 그때 횟수 테이블을 둡니다
+- "아주 긴 대화를 나눠 셀지"가 회의에서 정해지면, 나눈 조각마다 `request_id`를 따로 받는 식으로 이 테이블을 그대로 씁니다
+
+### 9. ID
 DB에서는 숫자 ID(`bigint`)를 쓰고, API에서는 명세처럼 접두어를 붙여 보여줍니다 (`users.id = 123` ↔ `"u_123"`).
+**보호자도 `users`의 한 줄이라 같은 `u_` 접두어를 씁니다** (예: `u_789`). 역할은 `role` 컬럼과 API 필드 이름(`guardian_id`)으로 구분합니다 (B 제안, #67 명세 7 "ID 규칙").
 
 ## 회의에서 정할 것
 

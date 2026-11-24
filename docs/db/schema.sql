@@ -3,6 +3,7 @@
 --
 -- 규칙
 --   - PK는 bigint identity. API에서는 접두어를 붙여 보여준다 (users.id = 123 ↔ "u_123")
+--     보호자도 users의 한 줄이라 같은 u_ 접두어를 쓴다 (역할은 role 컬럼과 필드 이름으로 구분)
 --   - 시각은 timestamptz, 날짜만은 date, 시각만은 time (한국 시간 기준 값)
 --   - 지우지 않고 남겨야 하는 것(동의, 발송, 신고)은 UPDATE/DELETE 하지 않고 행을 쌓는다
 --   - [민감] 표시 컬럼: 대화 원문·건강 정보. 로그 금지, 암호화·보관 기간 대상
@@ -332,12 +333,21 @@ CREATE TABLE subscriptions (
 -- 한 어르신에게 유효한 구독은 하나
 CREATE UNIQUE INDEX subscriptions_one_live ON subscriptions (user_id) WHERE status IN ('trial', 'active', 'grace');
 
--- 하루 대화 횟수 (명세 6). 토큰 단위는 사용자에게 보여주지 않음
-CREATE TABLE usage_daily (
-    user_id             bigint   NOT NULL REFERENCES users(id),
-    date                date     NOT NULL,
-    conversation_count  integer  NOT NULL DEFAULT 0 CHECK (conversation_count >= 0),
-    PRIMARY KEY (user_id, date)
+-- 대화 기록 (명세 6-2). 대화 하나에 한 줄. request_id로 같은 대화를 두 번 세지 않는다
+CREATE TABLE usage_conversations (
+    request_id          uuid        PRIMARY KEY,           -- A가 대화 하나에 하나 만듦. 재시도·나중 기록에도 같은 값
+    user_id             bigint      NOT NULL REFERENCES users(id),
+    conversation_id     text        NOT NULL,              -- A 대화 기록 참조 (#18)
+    started_at          timestamptz NOT NULL,              -- 대화 시작 시각 (A가 보낸 값)
+    date                date        NOT NULL,              -- started_at을 사용자 시간대(users.timezone)로 바꾼 날짜. 이 날짜의 횟수로 셈
+    created_at          timestamptz NOT NULL DEFAULT now() -- B가 받은 시각 (장애 후 늦게 기록되면 started_at보다 늦음)
 );
+CREATE INDEX usage_conversations_daily ON usage_conversations (user_id, date);
+
+-- 하루 대화 횟수 (명세 6-1). 기록에서 세기만 한다 (횟수를 따로 저장하지 않아 두 값이 어긋날 일이 없음)
+CREATE VIEW usage_daily AS
+SELECT user_id, date, count(*)::integer AS conversation_count
+FROM usage_conversations
+GROUP BY user_id, date;
 
 COMMIT;
