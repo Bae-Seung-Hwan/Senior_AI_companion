@@ -88,6 +88,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(self.error_code(time="3시"), (400, "INVALID_REQUEST"))
         self.assertEqual(self.error_code(request_id="abc"), (400, "INVALID_REQUEST"))
         self.assertEqual(self.error_code(repeat={"freq": "weekly"}), (400, "INVALID_REQUEST"))
+        self.assertEqual(self.error_code(time_hint="morning"), (400, "INVALID_REQUEST"))  # time과 둘 다
 
     def test_오류는_저장하지_않음(self):
         body = req(title="")
@@ -133,6 +134,11 @@ class HttpTest(unittest.TestCase):
     def test_가짜_장애_헤더(self):
         status, resp = self.call("POST", "/todos", req(), headers={"X-Mock-Fail": "503"})
         self.assertEqual((status, resp["error"]["code"]), (503, "MOCK_FAILURE"))
+
+    def test_잘못된_지연_헤더는_무시(self):
+        for value in ("abc", "-1"):
+            status, _ = self.call("POST", "/todos", req(), headers={"X-Mock-Delay": value})
+            self.assertEqual(status, 201)
 
     def test_JSON_아님(self):
         r = urllib.request.Request(self.base + "/todos", data=b"{", method="POST")
