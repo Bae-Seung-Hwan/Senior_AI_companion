@@ -56,8 +56,8 @@ USER_RESPONSES = FINAL_RESPONSES | {"pending"}
 
 # 이 user_id로 보내면 보호자가 없는 것으로 보고 deliveries: [] 응답
 NO_GUARDIAN_USER_ID = "u_no_guardian"
-# 그 밖의 사용자는 보호자 한 명(g_01)이 연결되어 있다고 가정한다
-DEFAULT_GUARDIAN_ID = "g_01"
+# 그 밖의 사용자는 보호자 한 명(u_789)이 연결되어 있다고 가정한다
+DEFAULT_GUARDIAN_ID = "u_789"
 
 
 def adjusted_severity(alert_type, severity, user_response):

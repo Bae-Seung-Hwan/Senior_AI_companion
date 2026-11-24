@@ -16,8 +16,8 @@ from alert_mock import KST, ApiError, Store, make_handler
 NOW = datetime(2026, 11, 22, 14, 5, 20, tzinfo=KST)
 EVIDENCE = "아들이 휴대폰이 고장 났다고 문자로 급하게 300만원만 보내달래요."
 
-PUSH = {"guardian_id": "g_01", "channel": "push", "status": "sent"}
-ALIMTALK = {"guardian_id": "g_01", "channel": "alimtalk", "status": "queued"}
+PUSH = {"guardian_id": "u_789", "channel": "push", "status": "sent"}
+ALIMTALK = {"guardian_id": "u_789", "channel": "alimtalk", "status": "queued"}
 CANCELED = {**ALIMTALK, "status": "canceled"}
 
 
