@@ -122,7 +122,7 @@ class Store:
         alert["deliveries"].append({"guardian_id": DEFAULT_GUARDIAN_ID, "channel": channel, "status": status})
 
     def _has_alimtalk(self, alert):
-        return any(d["channel"] == "alimtalk" and d["status"] != "cancelled" for d in alert["deliveries"])
+        return any(d["channel"] == "alimtalk" and d["status"] != "canceled" for d in alert["deliveries"])
 
     def _apply_severity(self, alert, severity):
         """severity를 바꾸고 발송을 맞춘다. 이미 보낸(sent) 것은 취소하지 않는다."""
@@ -131,7 +131,7 @@ class Store:
         if severity == "medium":
             for d in alert["deliveries"]:
                 if d["channel"] == "alimtalk" and d["status"] == "queued":
-                    d["status"] = "cancelled"  # 낮출 때는 아직 안 보낸 알림톡만 취소
+                    d["status"] = "canceled"  # 낮출 때는 아직 안 보낸 알림톡만 취소
         alert["severity"] = severity
 
     @staticmethod

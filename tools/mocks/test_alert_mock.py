@@ -18,7 +18,7 @@ EVIDENCE = "아들이 휴대폰이 고장 났다고 문자로 급하게 300만�
 
 PUSH = {"guardian_id": "g_01", "channel": "push", "status": "sent"}
 ALIMTALK = {"guardian_id": "g_01", "channel": "alimtalk", "status": "queued"}
-CANCELLED = {**ALIMTALK, "status": "cancelled"}
+CANCELED = {**ALIMTALK, "status": "canceled"}
 
 
 def req(**over):
@@ -83,7 +83,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(status, 200)
         # 이미 보낸 푸시는 그대로, 아직 안 보낸 알림톡만 취소, 괜찮다는 후속 푸시
         self.assertEqual(resp, {"alert_id": first["alert_id"], "severity": "medium",
-                                "deliveries": [PUSH, CANCELLED, PUSH]})
+                                "deliveries": [PUSH, CANCELED, PUSH]})
 
     def test_응급_dismissed는_그대로(self):
         _, first = self.create(type="emergency", severity="high")

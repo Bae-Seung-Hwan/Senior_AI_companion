@@ -120,7 +120,7 @@ curl -X PATCH http://127.0.0.1:8049/alerts/al_001 -H "Content-Type: application/
   "severity": "medium",
   "deliveries": [
     { "guardian_id": "g_01", "channel": "push", "status": "sent" },
-    { "guardian_id": "g_01", "channel": "alimtalk", "status": "cancelled" },
+    { "guardian_id": "g_01", "channel": "alimtalk", "status": "canceled" },
     { "guardian_id": "g_01", "channel": "push", "status": "sent" }
   ]
 }
@@ -131,7 +131,7 @@ curl -X PATCH http://127.0.0.1:8049/alerts/al_001 -H "Content-Type: application/
 | `user_response` | 사기 (`fraud`) | 응급 (`emergency`) |
 | --- | --- | --- |
 | `pending`, `call_119_requested`, `guardian_call_requested`, `guardian_check_requested` | 그대로 | 그대로 |
-| `dismissed` | `medium`으로 낮춤 → `queued` 알림톡을 `cancelled`로 | 그대로 |
+| `dismissed` | `medium`으로 낮춤 → `queued` 알림톡을 `canceled`로 | 그대로 |
 | `no_response` | 그대로 | `high`로 올림 → 알림톡 추가 |
 
 - `dismissed`면 사기·응급 모두 "괜찮다고 응답하셨어요" 후속 푸시를 하나 더 보냅니다 (`deliveries` 끝에 push 추가)
@@ -156,7 +156,7 @@ curl -X PATCH http://127.0.0.1:8049/alerts/al_001 -H "Content-Type: application/
 
 > **mock에서 임시로 정한 것** (#37에서 확정되면 맞춰 고칩니다)
 >
-> - 낮출 때 취소한 알림톡은 `status: "cancelled"`로 보여 줌 (명세의 status 값에 아직 없음)
+> - 낮출 때 취소한 알림톡은 `status: "canceled"`로 보여 줌 (명세의 status 값에 아직 없음)
 > - 후속 푸시는 일반 push 항목과 같은 모양 (구분 필드 없음)
 > - POST 같은 `request_id` 재요청도 `202` (1번처럼 `200`으로 바꿀지 미정)
 > - `evidence.conversation_id`·`message_id`는 검사하지 않음 (표에 필수 표시가 없음)
