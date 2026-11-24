@@ -38,12 +38,13 @@ CREATE TABLE auth_identities (
     UNIQUE (provider, provider_uid)
 );
 
--- 보호자 초대 (#40). 링크·코드를 카톡으로 보냄
+-- 보호자 초대 (#40). 링크·코드를 어르신 폰의 카톡 공유로 보내거나, 전화번호를 받아 알림톡으로 보냄
 CREATE TABLE guardian_invites (
     id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     senior_id     bigint      NOT NULL REFERENCES users(id),
     code          text        NOT NULL UNIQUE,
     relation      text,                                 -- 어르신이 적은 관계 (예: "딸")
+    invitee_phone text,                                 -- E.164. 알림톡 초대일 때만. 카톡 공유(링크)면 null. 사용·만료 후 지움
     expires_at    timestamptz NOT NULL,
     used_by       bigint      REFERENCES users(id),
     used_at       timestamptz,
@@ -88,7 +89,7 @@ CREATE TABLE consent_events (
     channel       text        NOT NULL DEFAULT 'app' CHECK (channel IN ('app', 'voice', 'guardian_assist')),
     created_at    timestamptz NOT NULL DEFAULT now(),
     -- 공유 범위는 보호자가 대신 바꿀 수 없음 (#43). 본인만
-    CHECK (consent_type NOT LIKE 'share_%' OR actor_id = user_id)
+    CHECK (consent_type NOT LIKE 'share\_%' OR actor_id = user_id)  -- \_ : LIKE에서 _는 한 글자 와일드카드라 이스케이프
 );
 CREATE INDEX consent_events_latest ON consent_events (user_id, consent_type, created_at DESC);
 
@@ -191,15 +192,23 @@ CREATE TABLE daily_reports (
     section_schedule text,
     section_health  text,                               -- [민감]
     section_mood    text,
-    mood_level      text        CHECK (mood_level IN ('good', 'normal', 'low')),
+    mood_level      text        NOT NULL CHECK (mood_level IN ('good', 'normal', 'low')),  -- 명세 3 필수. 보호자 전달은 기분 동의 시만
     stats           jsonb       NOT NULL DEFAULT '{}',  -- conversation_count, completed_todos
     generated_at    timestamptz NOT NULL,
-    request_id      uuid        UNIQUE,
     sent_at         timestamptz,                        -- 보낸 뒤에는 덮어쓰기 불가 (409 ALREADY_SENT)
     created_at      timestamptz NOT NULL DEFAULT now(),
     updated_at      timestamptz NOT NULL DEFAULT now(),
     UNIQUE (user_id, date)
 );
+
+-- 하루 요약을 만든 요청들 (명세 3). 덮어써도 이전 request_id를 모두 기억해서,
+-- 예전 request_id로 재시도가 와도 새 요청으로 처리하지 않고 지금 요약을 돌려준다
+CREATE TABLE daily_report_requests (
+    request_id      uuid        PRIMARY KEY,
+    report_id       bigint      NOT NULL REFERENCES daily_reports(id),
+    received_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX daily_report_requests_report ON daily_report_requests (report_id);
 
 -- 긴급 알림 (명세 4). 사용량 제한·공유 범위와 상관없이 항상 처리
 CREATE TABLE alerts (
@@ -212,12 +221,16 @@ CREATE TABLE alerts (
     evidence_text      text        NOT NULL,            -- [민감] 알림톡에 넣지 않고 보호자 앱에서만 표시
     conversation_id    text,
     message_id         text,
-    user_response      text        NOT NULL CHECK (user_response IN (
+    user_response      text        NOT NULL DEFAULT 'pending' CHECK (user_response IN (
+                           'pending',              -- 4-1 감지 즉시. 어르신이 아직 고르지 않음
                            'call_119_requested', 'guardian_call_requested',
                            'guardian_check_requested', 'dismissed', 'no_response')),
     detected_at        timestamptz NOT NULL,
-    request_id         uuid        NOT NULL UNIQUE,
-    created_at         timestamptz NOT NULL DEFAULT now()
+    responded_at       timestamptz,                    -- 4-2 최종 선택 시각 (no_response면 무응답으로 판단한 시각)
+    request_id         uuid        NOT NULL UNIQUE,    -- 4-1 POST
+    response_request_id uuid       UNIQUE,             -- 4-2 PATCH. 선택은 한 번만 (409 ALREADY_RESPONDED)
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    CHECK ((user_response = 'pending') = (responded_at IS NULL))
 );
 CREATE INDEX alerts_user_recent ON alerts (user_id, type, detected_at DESC);  -- 10분 내 합치기 판단용
 
@@ -227,8 +240,8 @@ CREATE TABLE notification_deliveries (
     recipient_id        bigint      NOT NULL REFERENCES users(id),
     channel             text        NOT NULL CHECK (channel IN ('push', 'alimtalk', 'sms')),
     subject_type        text        NOT NULL CHECK (subject_type IN ('daily_report', 'weekly_report', 'alert', 'invite', 'reminder')),
-    subject_id          bigint      NOT NULL,           -- subject_type에 따라 daily_reports / alerts / guardian_invites / reminders의 id
-    status              text        NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'failed')),
+    subject_id          bigint      NOT NULL,           -- subject_type에 따라 daily_reports / alerts / guardian_invites / reminders의 id (FK 없음, README 참고)
+    status              text        NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'failed', 'canceled')),  -- canceled: 긴급 알림 severity를 낮춰 아직 안 보낸 알림톡 취소
     fallback_of         bigint      REFERENCES notification_deliveries(id),  -- 푸시 실패 → 알림톡 대체 발송
     provider_message_id text,
     error_code          text,

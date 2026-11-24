@@ -1,7 +1,8 @@
 # DB 스키마 초안 (#3)
 
 > 상태: **초안**. DB 종류는 #1 회의에서 정합니다. B 기술 조사([PR #64](https://github.com/Bae-Seung-Hwan/Senior_AI_companion/pull/64)의 `docs/research/b-stack.md`)에서 잠정 추천한 PostgreSQL 기준으로 썼습니다.
-> SQL: [schema.sql](schema.sql). PostgreSQL 18에서 실제로 실행해 테이블 20개가 만들어지는 것과 제약 조건 9가지가 의도대로 막히는 것을 확인했습니다.
+> SQL: [schema.sql](schema.sql). PostgreSQL 18에서 실제로 실행해 테이블 21개가 만들어지는 것과 제약 조건이 의도대로 막히는 것을 확인했습니다.
+> 명세는 [PR #37](https://github.com/Bae-Seung-Hwan/Senior_AI_companion/pull/37) 초안(0b778ee) 기준입니다 (긴급 알림 두 번 호출, `time`·`time_hint` 둘 중 하나, 요약 `request_id` 기억).
 
 **범위**: #3의 B 몫 전체(회원·보호자·동의, 할 일·복약, 보호자 전송, 모임, 구독)입니다.
 **A 몫인 대화 기록(#18)은 이 초안에 없습니다.** B 테이블은 `conversation_id`, `message_id`를 문자열로만 들고 있어서, A가 대화 테이블을 어떻게 설계해도 바꿀 필요가 없습니다.
@@ -21,6 +22,7 @@ erDiagram
     todos ||--o{ todo_completions : "완료"
     todos ||--o{ reminders : "알림 예약"
     users ||--o{ daily_reports : "하루 요약"
+    daily_reports ||--o{ daily_report_requests : "받은 request_id"
     users ||--o{ alerts : "긴급 알림"
     users ||--o{ notification_deliveries : "받은 알림"
     users ||--o{ user_interests : "관심사"
@@ -38,7 +40,7 @@ erDiagram
 | --- | --- | --- | --- |
 | 회원·보호자 | `users` | 어르신·보호자 (`role`로 구분), 호칭, 동네 | #39 |
 | | `auth_identities` | 로그인 수단 (카카오·애플·전화번호 등) | #4 |
-| | `guardian_invites` | 보호자 초대 코드 | #40 |
+| | `guardian_invites` | 보호자 초대 코드 (카톡 공유 링크 또는 알림톡용 전화번호) | #40 |
 | | `guardian_links` | 어르신 ↔ 보호자 연결 (여러 명, 해제 이력 남김) | #40 |
 | | `consent_events` + 뷰 `current_consents` | **동의·철회 이력** (쌓기만 함) + 지금 유효한 동의 | #41, 명세 3·7 |
 | | `user_preferences` | `time_hint` 기본 시각, 방해 금지 시간, 요약 발송 시각, 글씨·말 속도 | #43, 명세 1 |
@@ -47,7 +49,8 @@ erDiagram
 | | `todo_completions` | 회차별 완료 ("약 먹었어") | #44 |
 | | `reminders` | 예약된 알림, 스케줄러가 꺼내 보냄 | #47 |
 | 보호자 전송 | `daily_reports` | 하루 요약 (사용자·날짜당 하나) | #48, 명세 3 |
-| | `alerts` | 긴급 알림 | #49, 명세 4 |
+| | `daily_report_requests` | 요약을 만든 `request_id` 전부 (덮어써도 이전 값 기억) | #48, 명세 3 |
+| | `alerts` | 긴급 알림 (감지 즉시 `pending` → 어르신 선택으로 갱신) | #49, 명세 4 |
 | | `notification_deliveries` | 누구에게 어떤 채널로 보냈는지 (푸시 실패 → 알림톡 대체 발송 연결) | #50 |
 | 모임 | `user_interests` | 관심사 (대화에서 추출, 본인이 삭제 가능) | #53, 명세 2 |
 | | `meetups`, `meetup_members` | 모임, 참여자 | #54, #55 |
@@ -65,7 +68,10 @@ erDiagram
 ### 2. 명세의 규칙을 DB 제약으로도 막음
 | 명세 규칙 | DB에서 |
 | --- | --- |
-| 같은 `request_id`로 다시 보내면 새로 만들지 않음 | `todos`, `daily_reports`, `alerts`의 `request_id UNIQUE` |
+| 같은 `request_id`로 다시 보내면 새로 만들지 않음 | `todos.request_id`, `alerts.request_id`·`response_request_id` UNIQUE, `daily_report_requests` PK |
+| 요약을 덮어써도 이전 `request_id`는 중복으로 처리 | `daily_report_requests`에 요청마다 한 줄 (요약 하나에 여러 줄) |
+| 긴급 알림 선택은 한 번만, `pending`이면 선택 시각 없음 | `CHECK ((user_response = 'pending') = (responded_at IS NULL))` |
+| `mood_level` 필수 | `daily_reports.mood_level NOT NULL` |
 | 반복도 날짜도 없으면 `MISSING_SCHEDULE` | `CHECK (date IS NOT NULL OR repeat_freq IS NOT NULL)` |
 | `time`과 `time_hint`는 둘 중 하나 | `CHECK (time IS NULL OR time_hint IS NULL)` |
 | 매주 반복에는 요일 필요 | `CHECK`로 요일 배열 필수 |
@@ -81,7 +87,16 @@ erDiagram
 - `daily_reports.section_health`: 건강 문단
 - `alerts.evidence_text`: 긴급 알림 근거 발화
 
-### 5. ID
+### 5. 긴급 알림 동의는 "근거 발화 공유"만 끌 수 있음
+`consent_type = 'emergency_alert'`는 **긴급 알림 자체를 켜고 끄는 동의가 아닙니다.** 명세 4번대로 긴급 알림은 공유 범위·동의와 상관없이 항상 나갑니다. 이 동의로 끌 수 있는 것은 보호자 앱에서 근거 발화(`evidence_text`)를 보여 주는 것뿐입니다.
+
+### 6. `notification_deliveries.subject_id`에는 FK가 없음
+`subject_type`에 따라 `daily_reports`, `alerts`, `guardian_invites`, `reminders` 중 하나를 가리키기 때문에 FK 하나로 걸 수 없습니다. 발송 기록은 쌓기만 하는 로그라 대상이 지워져도 남아야 해서 FK가 없는 편이 맞다고 봤습니다. 대신 앱 코드에서 `(subject_type, subject_id)`로 대상을 찾고, 인덱스를 걸어 두었습니다. 채널별 테이블로 나누는 방법은 발송 종류가 늘면 다시 봅니다.
+
+### 7. 보호자 초대는 두 가지 방식
+`guardian_invites.invitee_phone`이 null이면 어르신 폰의 카톡 공유(링크)로 보낸 초대, 값이 있으면 알림톡 "보호자 초대" 템플릿으로 보낸 초대입니다. 가입 전 보호자의 전화번호라서 초대가 쓰이거나 만료되면 지웁니다.
+
+### 8. ID
 DB에서는 숫자 ID(`bigint`)를 쓰고, API에서는 명세처럼 접두어를 붙여 보여줍니다 (`users.id = 123` ↔ `"u_123"`).
 
 ## 회의에서 정할 것
