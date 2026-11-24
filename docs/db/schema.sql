@@ -2,7 +2,7 @@
 -- 상태: 초안. PostgreSQL 15 이상 (DB는 #1 회의에서 확정). 설명은 docs/db/README.md
 --
 -- 규칙
---   - PK는 bigint identity. API에서는 접두어를 붙여 보여준다 (users.id = 123 ↔ "u_123")
+--   - PK는 bigint identity. API에서는 접두어를 붙여 보여준다 (users.id = 123 ↔ "u_123", meetups.id = 12 ↔ "mt_12")
 --     보호자도 users의 한 줄이라 같은 u_ 접두어를 쓴다 (역할은 role 컬럼과 필드 이름으로 구분)
 --   - 시각은 timestamptz, 날짜만은 date, 시각만은 time (한국 시간 기준 값)
 --   - 지우지 않고 남겨야 하는 것(동의, 발송, 신고)은 UPDATE/DELETE 하지 않고 행을 쌓는다
@@ -15,6 +15,12 @@ BEGIN;
 -- 1. 회원·보호자 (#11)
 -- ─────────────────────────────────────────────
 
+-- 행정동 (#54, 명세 5). 코드 → 이름. 정확한 위치(좌표)는 어디에도 저장하지 않는다
+CREATE TABLE regions (
+    code          text        PRIMARY KEY,              -- 행정동 코드 (행정안전부 10자리)
+    name          text        NOT NULL                  -- 예: "서울 강남구 역삼1동". 명세 5 region_name
+);
+
 CREATE TABLE users (
     id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     role          text        NOT NULL CHECK (role IN ('senior', 'guardian')),
@@ -22,10 +28,10 @@ CREATE TABLE users (
     display_name  text,                                 -- AI가 부르는 호칭 (예: "김영자 님")
     birth_year    smallint    CHECK (birth_year BETWEEN 1900 AND 2100),
     phone         text,                                 -- E.164 (+8210...). 알림톡 발송에 사용
-    region_code   text,                                 -- 행정동 코드. 정확한 위치는 저장하지 않음 (#54)
-    region_name   text,                                 -- 예: "서울 강남구 역삼동"
+    region_code   text        REFERENCES regions(code), -- 동네(행정동). null이면 아직 안 정함 → 명세 5 empty_reason "no_region"
     timezone      text        NOT NULL DEFAULT 'Asia/Seoul',
     created_at    timestamptz NOT NULL DEFAULT now(),
+    suspended_at  timestamptz,                          -- 신고(user_reports)로 이용 정지. 정지된 주최자의 모임은 추천에서 뺌 (명세 5)
     deleted_at    timestamptz                           -- 탈퇴. 개인정보는 탈퇴 처리 때 지움
 );
 
@@ -257,16 +263,30 @@ CREATE INDEX notification_deliveries_queue ON notification_deliveries (created_a
 -- ─────────────────────────────────────────────
 
 -- 관심사 (명세 2). "지금 즐기는 취미·활동"만. 본인이 지울 수 있음
+-- 지운 행은 남겨 둔다: 대화에서 온 같은 이름을 90일(임시) 안에 다시 넣지 않으려고 (명세 2 recently_removed)
 CREATE TABLE user_interests (
     id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id         bigint      NOT NULL REFERENCES users(id),
-    name            text        NOT NULL,               -- 예: "등산", "서예"
+    name            text        NOT NULL CHECK (name = btrim(name) AND length(name) BETWEEN 1 AND 20),  -- 예: "등산". 명세 2 INVALID_INTEREST_NAME
     source          text        NOT NULL CHECK (source IN ('voice', 'manual')),
-    conversation_id text,
+    original_text   text,                               -- [민감] 어르신이 한 말. 저장할지는 회의(#68). 본인 화면에서만, 보호자에게는 안 보임
+    conversation_id text,                               -- source = 'voice'일 때 A 대화 기록 참조
+    message_id      text,
+    request_id      uuid,                               -- 이 관심사를 추가한 명세 2 요청 (interest_requests)
     created_at      timestamptz NOT NULL DEFAULT now(),
-    removed_at      timestamptz
+    removed_at      timestamptz,                        -- 본인이 지운 시각
+    CHECK (source = 'voice' OR (original_text IS NULL AND conversation_id IS NULL AND message_id IS NULL))
 );
 CREATE UNIQUE INDEX user_interests_active ON user_interests (user_id, name) WHERE removed_at IS NULL;
+CREATE INDEX user_interests_removed ON user_interests (user_id, name, removed_at) WHERE removed_at IS NOT NULL;
+
+-- 관심사 반영 요청 (명세 2). 같은 request_id가 다시 오면 처음 결과(항목별 status)를 그대로 돌려준다
+CREATE TABLE interest_requests (
+    request_id      uuid        PRIMARY KEY,
+    user_id         bigint      NOT NULL REFERENCES users(id),
+    results         jsonb       NOT NULL,               -- [{"name": "등산", "status": "added"}, ...] 요청 순서대로
+    received_at     timestamptz NOT NULL DEFAULT now()
+);
 
 CREATE TABLE meetups (
     id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -274,15 +294,16 @@ CREATE TABLE meetups (
     hobby           text        NOT NULL,
     title           text        NOT NULL,
     description     text,
-    region_code     text        NOT NULL,               -- 동네 단위 매칭
+    region_code     text        NOT NULL REFERENCES regions(code),  -- 동네 단위 매칭 (명세 5)
     place_name      text        NOT NULL,               -- 공공장소 (첫 만남 안전)
     starts_at       timestamptz NOT NULL,
-    capacity        smallint    NOT NULL CHECK (capacity BETWEEN 2 AND 50),
+    capacity        smallint    NOT NULL CHECK (capacity BETWEEN 2 AND 50),  -- 주최자 포함
     status          text        NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed', 'canceled')),
     created_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX meetups_match ON meetups (region_code, hobby, starts_at) WHERE status = 'open';
 
+-- 참여자. 주최자도 모임을 만들 때 한 줄 넣는다 (명세 5 joined_count는 주최자 포함, left_at IS NULL만 셈)
 CREATE TABLE meetup_members (
     meetup_id       bigint      NOT NULL REFERENCES meetups(id),
     user_id         bigint      NOT NULL REFERENCES users(id),
