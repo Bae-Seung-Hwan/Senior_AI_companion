@@ -51,8 +51,47 @@ python -m unittest discover -s server/tests -t server
 
 테스트는 Claude를 부르지 않습니다 (가짜 client). B 호출은 테스트 안에서 띄운 가짜 HTTP 서버로 확인합니다.
 
-### 남은 일
+### 남은 일 (할 일 등록)
 
 - 음성 대화(STT·TTS, 대화 LLM)에 붙이기: 추출이 1~3초 걸리므로 **대화 답변과 동시에** 돌리고, 할 일이 나오면 답변 뒤에 확인 질문을 붙이는 방식 권장
 - 추출 정확도 검증용 문장 모음 (사투리, 숫자 표현, 할 일이 아닌 말)
 - 사용자별 호칭·기본 시각은 명세 7(`GET /users/{user_id}`)이 정해지면 반영
+
+## 하루 요약 (#29 생성, #31 B 전송, 명세 3)
+
+```
+그날 대화 (samples/day_u_123.json)  →  요약 쓰기 (Claude Sonnet 5.5)  →  규칙 검사  →  B POST /guardian-reports/daily  →  결과 저장
+```
+
+| 파일 | 하는 일 |
+| --- | --- |
+| [`companion/reports/writer.py`](companion/reports/writer.py) | 요약 쓰기. 하루 한 번 돌고 보호자가 읽는 글이라 Sonnet 5.5 (음성 스택 조사 결론). 거절되면 서버가 다른 모델로 다시 쓰게 server-side fallback 켬 |
+| [`companion/reports/guard.py`](companion/reports/guard.py) | 보호자에게 나가기 전 규칙 검사 (아래) |
+| [`companion/reports/batch.py`](companion/reports/batch.py) | 사용자마다 쓰기 → 보내기 → 저장. 명령줄로 실행 |
+| [`companion/reports/b_client.py`](companion/reports/b_client.py) | 명세 3 호출. 배치라 공통 규칙대로 재시도 (1·3·10초), `409 ALREADY_SENT`면 덮어쓰지 않음 |
+| [`companion/reports/models.py`](companion/reports/models.py) | 하루치 대화(입력)와 명세 3 요청 본문 |
+| [`companion/b_http.py`](companion/b_http.py) | B 호출 공통부 (재시도, 에러 본문 읽기). 할 일 등록도 같이 씀 |
+
+### 지키는 규칙
+
+- **brief에는 일정·건강·기분 내용을 넣지 않습니다** (공유 범위와 상관없이 항상 보호자에게 감). 보호자 푸시 본문에도 brief만 들어갑니다
+- **각 section에는 자기 항목 내용만** 넣습니다. 보호자는 동의한 항목만 받기 때문에, 예를 들어 기분만 공유했는데 mood에 "치과 가기 귀찮아하셨어요"가 있으면 일정이 새어 나갑니다
+- 의료 표현을 쓰지 않습니다 ("치매", "증상", "진단" 등)
+- 위 규칙은 프롬프트로 지시하고, **보내기 전에 단어 목록으로 한 번 더 검사**합니다. 걸리면 이유를 알려 주고 한 번 다시 쓰게 하고, 그래도 걸리면 brief는 기본 문장으로 바꾸고 해당 section은 뺍니다 (동의하지 않은 내용이 새는 것보다 빠지는 편이 낫다고 봄)
+- 대화가 없는 날은 보내지 않습니다 (임시, 아래)
+- 화면·로그에는 상태만 남기고, 요약 문장은 `--out` 폴더(`.gitignore`)에만 저장합니다
+
+### 실행
+
+```bash
+python tools/mocks/report_mock.py        # B mock 먼저 (PR #66)
+cd server
+python -m companion.reports.batch samples/day_u_123.json --out ../.reports
+```
+
+### 정해야 할 것
+
+- **대화가 없는 날**: 지금은 보내지 않습니다. "오늘은 대화가 없었어요"를 보호자에게 알리면 안부 확인이 되지만 감시 느낌을 줄 수 있습니다. `mood_level`이 필수라 보낸다면 값도 정해야 합니다
+- **`stats.completed_todos`**: 이슈 #29는 "완료한 할 일(B 조회)"인데 명세에 B 조회 API가 없습니다. 지금은 입력 파일에 있으면 넣고 없으면 뺍니다
+- **입력**: 대화 기록 저장(#18)이 생기면 파일 대신 거기서 읽습니다
+- **실행 시각**: 보호자 요약 발송 시각(명세 7 `report_send_time`, 기본 21:00) 전에 돌리는 스케줄러는 서버 스택(#1)이 정해지면 붙입니다
