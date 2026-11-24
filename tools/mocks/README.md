@@ -7,12 +7,17 @@ Python 3.10 이상만 있으면 되고, 설치할 것은 없습니다. 데이터
 | mock | 명세 | 이슈 | 기본 주소 |
 | --- | --- | --- | --- |
 | [todo_mock.py](todo_mock.py) | 1. 할 일 등록 | #45 | `http://127.0.0.1:8045` |
+| [report_mock.py](report_mock.py) | 3. 하루 요약 | #48 | `http://127.0.0.1:8048` |
 | [alert_mock.py](alert_mock.py) | 4. 긴급 알림 | #49 | `http://127.0.0.1:8049` |
 
 ## 실행
 
 ```bash
 python tools/mocks/todo_mock.py
+```
+
+```bash
+python tools/mocks/report_mock.py
 ```
 
 ```bash
@@ -68,6 +73,76 @@ curl -X POST http://127.0.0.1:8045/todos -H "Content-Type: application/json" -d 
 - `GET /health`: 서버가 떠 있는지 확인
 - `X-Mock-Fail: 503` 헤더: 강제로 5xx 응답 → A의 재시도(같은 `request_id`로 최대 3번) 확인
 - `X-Mock-Delay: 3` 헤더: 3초 늦게 응답 → 시간 초과 처리 확인 (최대 30초, 숫자가 아니거나 음수면 무시)
+
+## 3. 하루 요약 mock
+
+`POST /guardian-reports/daily` — 명세 3번 (PR #37 초안, 0b778ee) 형식.
+**공유 범위 필터는 B가 합니다.** A는 항목을 전부 채워 보내고, mock이 동의한 항목만 골라 보호자에게 넘깁니다.
+MVP 보호자 전송은 앱 푸시만이라 (2026-11-24 합의) `deliveries`는 `push`만 나옵니다. 실제로 보내지는 않습니다.
+
+```bash
+curl -X POST http://127.0.0.1:8048/guardian-reports/daily -H "Content-Type: application/json" -d '{
+  "request_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+  "user_id": "u_share_all",
+  "date": "2026-11-22",
+  "brief": "오늘도 편안하게 잘 지내셨어요.",
+  "sections": {
+    "schedule": "오후에 치과에 다녀오셨고, 혈압약도 잘 챙겨 드셨어요.",
+    "health": "무릎이 조금 쑤신다고 하셔서 집에서 쉬셨어요.",
+    "mood": "손주 시험 이야기를 하시며 즐거워하셨어요."
+  },
+  "mood_level": "good",
+  "stats": { "conversation_count": 6, "completed_todos": 2 },
+  "generated_at": "2026-11-22T21:00:00+09:00"
+}'
+```
+
+```json
+{
+  "report_id": "r_001",
+  "shared_sections": ["schedule", "health", "mood"],
+  "deliveries": [{ "guardian_id": "g_01", "channel": "push", "status": "queued" }]
+}
+```
+
+### 공유 범위
+
+| 사용자 | 공유 범위 |
+| --- | --- |
+| 기본 (아무 `user_id`) | **아무것도 공유하지 않음** → 보호자에게는 `brief`만 ("감시 느낌 피하기" 기본값) |
+| `u_share_all` | 일정·건강·기분 모두 공유 |
+| 직접 바꾸기 | `PUT /mock/share-scope/{user_id}` + `{"schedule": true, "mood": true}` |
+
+- `mood_level`도 기분 공유를 켰을 때만 보호자에게 보입니다
+- 비어 있는(`null`) section은 동의했어도 `shared_sections`에 넣지 않습니다
+- 푸시 본문에는 `brief`만 넣습니다. 잠금 화면에 보일 수 있어서 section은 앱에서만 보여 줍니다
+
+### mock이 돌려주는 응답
+
+| 상황 | 응답 |
+| --- | --- |
+| 정상 | `202` + `report_id`, `shared_sections`, `deliveries` (push `queued`) |
+| 보내기 전에 같은 날짜로 다시 보냄 | `202` + 같은 `report_id`로 **덮어씀** |
+| 같은 `request_id`로 다시 보냄 | `202` + 지금 저장된 결과 (새로 처리하지 않음) |
+| **덮어쓰기 전의 `request_id`로 재시도** | `202` + 지금 저장된 결과 (예전 내용으로 되돌리지 않음) |
+| 이미 보낸 날짜에 새 요약 | `409 ALREADY_SENT` |
+| `user_id`가 `u_no_guardian` | `202` + `deliveries: []` (A는 에러로 처리하지 않음) |
+| `user_id`가 `u_unknown` | `404 USER_NOT_FOUND` |
+| 형식 오류 (UUID 아님, 날짜 형식, 빈 `brief`, 없는 `mood_level`, 시간대 없는 `generated_at` 등) | `400 INVALID_REQUEST` |
+
+> **mock에서 임시로 정한 것** (#37에서 확정되면 맞춰 고칩니다)
+>
+> - 같은 `request_id` 재요청도 `202` (1번처럼 `200`으로 바꿀지 미정)
+> - 발송 전 `deliveries` 상태는 `queued`. 무료 등급 주 1회 발송용 `scheduled` + `scheduled_at`은 #37 B 리뷰 4번이 정해지면 추가
+> - `sections`를 아예 안 보내면 셋 다 `null`로 봄
+> - 미래 날짜는 검사하지 않음 (명세에 규칙 없음)
+
+### 확인·테스트용 (mock 전용, 실제 서버에는 없음)
+
+- `GET /guardian-reports?user_id=u_123`: 받은 요약 전체 + `guardian_view`(**보호자 화면에 실제로 보이는 내용**, 지금 공유 범위 기준), `push_body`, `share_scope`, 받은 `request_ids`
+- `POST /mock/guardian-reports/{report_id}/send`: 발송 시각이 된 것처럼 보냄 처리 (`status`가 `sent`로). 이후 같은 날짜는 `409`
+- `PUT /mock/share-scope/{user_id}`: 공유 범위 바꾸기. 이미 받은 요약의 `shared_sections`는 그대로고, `guardian_view`는 바뀐 범위로 보임
+- `GET /health`, `X-Mock-Fail`, `X-Mock-Delay`: 1번 mock과 같음
 
 ## 4. 긴급 알림 mock
 
@@ -176,8 +251,8 @@ python -m unittest discover tools/mocks
 ## 구조
 
 공통 코드(오류 형식, 응답 보내기, 테스트용 헤더, CORS, 실행)는 [_common.py](_common.py)에 있습니다.
-새 mock은 `MockHandler`를 상속해 `route()`만 채우면 됩니다 (명세 3·6·7 예정).
+새 mock은 `MockHandler`를 상속해 `route()`만 채우면 됩니다 (명세 6·7 예정).
 
 ## 개인정보
 
-서버 로그에는 경로와 상태 코드만 남기고, 대화 원문(`original_text`, `evidence.text`)은 남기지 않습니다.
+서버 로그에는 경로와 상태 코드만 남기고, 대화 원문(`original_text`, `evidence.text`)과 요약 문장(`sections`)은 남기지 않습니다.
