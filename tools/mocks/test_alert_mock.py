@@ -18,6 +18,7 @@ EVIDENCE = "아들이 휴대폰이 고장 났다고 문자로 급하게 300만�
 
 PUSH = {"guardian_id": "g_01", "channel": "push", "status": "sent"}
 ALIMTALK = {"guardian_id": "g_01", "channel": "alimtalk", "status": "queued"}
+CANCELLED = {**ALIMTALK, "status": "cancelled"}
 
 
 def req(**over):
@@ -28,8 +29,18 @@ def req(**over):
         "severity": "high",
         "reason": "가족을 사칭해 급하게 송금을 요구하는 메신저 피싱 의심",
         "evidence": {"text": EVIDENCE, "conversation_id": "c_456", "message_id": "m_801"},
-        "user_response": "guardian_check_requested",
+        "user_response": "pending",
         "detected_at": "2026-11-22T14:05:12+09:00",
+    }
+    body.update(over)
+    return body
+
+
+def patch(user_response, **over):
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "user_response": user_response,
+        "responded_at": "2026-11-22T14:05:40+09:00",
     }
     body.update(over)
     return body
@@ -47,20 +58,93 @@ class StoreTest(unittest.TestCase):
             self.create(**over)
         return ctx.exception.status, ctx.exception.code
 
+    def respond(self, alert_id, user_response, **over):
+        return self.store.respond(alert_id, patch(user_response, **over))
+
+    def patch_error(self, alert_id, user_response, **over):
+        with self.assertRaises(ApiError) as ctx:
+            self.respond(alert_id, user_response, **over)
+        return ctx.exception.status, ctx.exception.code
+
     def test_high는_푸시와_알림톡(self):
         status, resp = self.create()
         self.assertEqual(status, 202)
-        self.assertEqual(resp, {"alert_id": "al_001", "deliveries": [PUSH, ALIMTALK]})
+        self.assertEqual(resp, {"alert_id": "al_001", "severity": "high", "deliveries": [PUSH, ALIMTALK]})
 
     def test_medium은_푸시만(self):
-        _, resp = self.create(type="emergency", severity="medium", user_response="no_response")
-        self.assertEqual(resp["deliveries"], [PUSH])
+        _, resp = self.create(type="emergency", severity="medium")
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("medium", [PUSH]))
 
-    def test_dismissed면_medium으로_낮춰서_보냄(self):
-        _, resp = self.create(user_response="dismissed")
-        self.assertEqual(resp["deliveries"], [PUSH])
-        saved = self.store.list()[0]
-        self.assertEqual((saved["severity"], saved["requested_severity"]), ("medium", "high"))
+    # --- 4-2 PATCH와 severity 규칙 ---
+
+    def test_사기_dismissed면_medium으로_낮추고_알림톡_취소(self):
+        _, first = self.create(type="fraud", severity="high")
+        status, resp = self.respond(first["alert_id"], "dismissed")
+        self.assertEqual(status, 200)
+        # 이미 보낸 푸시는 그대로, 아직 안 보낸 알림톡만 취소, 괜찮다는 후속 푸시
+        self.assertEqual(resp, {"alert_id": first["alert_id"], "severity": "medium",
+                                "deliveries": [PUSH, CANCELLED, PUSH]})
+
+    def test_응급_dismissed는_그대로(self):
+        _, first = self.create(type="emergency", severity="high")
+        _, resp = self.respond(first["alert_id"], "dismissed")
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", [PUSH, ALIMTALK, PUSH]))
+
+    def test_응급_no_response면_high로_올리고_알림톡_추가(self):
+        _, first = self.create(type="emergency", severity="medium")
+        _, resp = self.respond(first["alert_id"], "no_response")
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", [PUSH, ALIMTALK]))
+
+    def test_사기_no_response는_그대로(self):
+        _, first = self.create(type="fraud", severity="medium")
+        _, resp = self.respond(first["alert_id"], "no_response")
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("medium", [PUSH]))
+
+    def test_그_밖의_선택은_그대로(self):
+        for choice in ("call_119_requested", "guardian_call_requested", "guardian_check_requested"):
+            with self.subTest(choice=choice):
+                _, first = self.create()
+                _, resp = self.respond(first["alert_id"], choice)
+                self.assertEqual(resp, first)
+
+    def test_POST에서_바로_최종_선택을_보내면_규칙_적용(self):
+        _, resp = self.create(type="fraud", severity="high", user_response="dismissed")
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("medium", [PUSH]))
+        _, resp = self.create(type="emergency", severity="medium", user_response="no_response")
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", [PUSH, ALIMTALK]))
+        # 이미 최종 선택이 있으니 PATCH는 409
+        self.assertEqual(self.patch_error(resp["alert_id"], "dismissed"), (409, "ALREADY_RESPONDED"))
+
+    def test_선택은_한_번만(self):
+        _, first = self.create()
+        self.respond(first["alert_id"], "guardian_check_requested")
+        self.assertEqual(self.patch_error(first["alert_id"], "dismissed"), (409, "ALREADY_RESPONDED"))
+
+    def test_PATCH_같은_request_id는_처음_응답_그대로(self):
+        _, first = self.create()
+        body = patch("dismissed")
+        once = self.store.respond(first["alert_id"], body)
+        again = self.store.respond(first["alert_id"], body)
+        self.assertEqual(again, once)
+        self.assertEqual(len(self.store.list()[0]["deliveries"]), 3)  # 후속 푸시를 두 번 보내지 않음
+
+    def test_PATCH_오류_코드(self):
+        _, first = self.create()
+        aid = first["alert_id"]
+        self.assertEqual(self.patch_error("al_999", "dismissed"), (404, "NOT_FOUND"))
+        self.assertEqual(self.patch_error(aid, "pending"), (400, "INVALID_REQUEST"))
+        self.assertEqual(self.patch_error(aid, "ok"), (400, "INVALID_REQUEST"))
+        self.assertEqual(self.patch_error(aid, "dismissed", request_id="abc"), (400, "INVALID_REQUEST"))
+        self.assertEqual(self.patch_error(aid, "dismissed", responded_at="2026-11-22T14:05:40"),
+                         (400, "INVALID_REQUEST"))
+        # 오류는 기록하지 않으므로 이후 정상 선택은 됨
+        status, _ = self.respond(aid, "dismissed")
+        self.assertEqual(status, 200)
+
+    def test_보호자_없으면_PATCH도_빈_deliveries(self):
+        _, first = self.create(user_id="u_no_guardian", type="emergency", severity="medium")
+        _, resp = self.respond(first["alert_id"], "no_response")
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", []))
 
     def test_같은_request_id는_처음_응답_그대로(self):
         body = req()
@@ -84,6 +168,7 @@ class StoreTest(unittest.TestCase):
             {"evidence": None},
             {"evidence": {"conversation_id": "c_456"}},
             {"user_response": "ok"},
+            {"user_response": None},
             {"detected_at": "어제"},
             {"detected_at": "2026-11-22T14:05:12"},  # 시간대 없음
         ]
@@ -136,6 +221,20 @@ class HttpTest(unittest.TestCase):
     def test_가짜_장애_헤더(self):
         status, resp = self.call("POST", "/alerts", req(), headers={"X-Mock-Fail": "503"})
         self.assertEqual((status, resp["error"]["code"]), (503, "MOCK_FAILURE"))
+
+    def test_PATCH로_선택_전달(self):
+        _, first = self.call("POST", "/alerts", req(type="emergency", severity="medium"))
+        status, resp = self.call("PATCH", f"/alerts/{first['alert_id']}", patch("no_response"))
+        self.assertEqual((status, resp["severity"]), (200, "high"))
+        status, resp = self.call("PATCH", f"/alerts/{first['alert_id']}", patch("dismissed"))
+        self.assertEqual((status, resp["error"]["code"]), (409, "ALREADY_RESPONDED"))
+        status, resp = self.call("PATCH", "/alerts/al_999", patch("dismissed"))
+        self.assertEqual((status, resp["error"]["code"]), (404, "NOT_FOUND"))
+
+    def test_잘못된_지연_헤더는_무시(self):
+        for value in ("abc", "-1"):
+            status, _ = self.call("POST", "/alerts", req(), headers={"X-Mock-Delay": value})
+            self.assertEqual(status, 202)
 
     def test_로그에_근거_발화를_남기지_않음(self):
         out = io.StringIO()

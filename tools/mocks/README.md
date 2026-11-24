@@ -71,7 +71,10 @@ curl -X POST http://127.0.0.1:8045/todos -H "Content-Type: application/json" -d 
 
 ## 4. 긴급 알림 mock
 
-`POST /alerts` — 명세 4번 (PR #37 초안) 형식. 실제 푸시·알림톡은 보내지 않고, 보냈다고 가정한 결과만 돌려줍니다.
+명세 4번 (PR #37 초안, 0b778ee) 형식. 실제 푸시·알림톡은 보내지 않고, 보냈다고 가정한 결과만 돌려줍니다.
+**두 번에 나눠 호출합니다**: 감지 즉시 `POST /alerts`(`pending`) → 어르신이 고르면 `PATCH /alerts/{alert_id}`.
+
+### 4-1. 감지 즉시: `POST /alerts`
 
 ```bash
 curl -X POST http://127.0.0.1:8049/alerts -H "Content-Type: application/json" -d '{
@@ -85,7 +88,7 @@ curl -X POST http://127.0.0.1:8049/alerts -H "Content-Type: application/json" -d
     "conversation_id": "c_456",
     "message_id": "m_801"
   },
-  "user_response": "guardian_check_requested",
+  "user_response": "pending",
   "detected_at": "2026-11-22T14:05:12+09:00"
 }'
 ```
@@ -93,6 +96,7 @@ curl -X POST http://127.0.0.1:8049/alerts -H "Content-Type: application/json" -d
 ```json
 {
   "alert_id": "al_001",
+  "severity": "high",
   "deliveries": [
     { "guardian_id": "g_01", "channel": "push", "status": "sent" },
     { "guardian_id": "g_01", "channel": "alimtalk", "status": "queued" }
@@ -100,33 +104,67 @@ curl -X POST http://127.0.0.1:8049/alerts -H "Content-Type: application/json" -d
 }
 ```
 
+### 4-2. 어르신의 선택: `PATCH /alerts/{alert_id}`
+
+```bash
+curl -X PATCH http://127.0.0.1:8049/alerts/al_001 -H "Content-Type: application/json" -d '{
+  "request_id": "d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70",
+  "user_response": "dismissed",
+  "responded_at": "2026-11-22T14:05:40+09:00"
+}'
+```
+
+```json
+{
+  "alert_id": "al_001",
+  "severity": "medium",
+  "deliveries": [
+    { "guardian_id": "g_01", "channel": "push", "status": "sent" },
+    { "guardian_id": "g_01", "channel": "alimtalk", "status": "cancelled" },
+    { "guardian_id": "g_01", "channel": "push", "status": "sent" }
+  ]
+}
+```
+
+### severity 규칙 (명세 4번 표대로 B가 적용)
+
+| `user_response` | 사기 (`fraud`) | 응급 (`emergency`) |
+| --- | --- | --- |
+| `pending`, `call_119_requested`, `guardian_call_requested`, `guardian_check_requested` | 그대로 | 그대로 |
+| `dismissed` | `medium`으로 낮춤 → `queued` 알림톡을 `cancelled`로 | 그대로 |
+| `no_response` | 그대로 | `high`로 올림 → 알림톡 추가 |
+
+- `dismissed`면 사기·응급 모두 "괜찮다고 응답하셨어요" 후속 푸시를 하나 더 보냅니다 (`deliveries` 끝에 push 추가)
+- POST에서 처음부터 최종 선택(`pending` 아닌 값)을 보내면 규칙을 먼저 적용한 뒤 한 번만 발송합니다. 이 알림에는 PATCH를 보낼 수 없습니다 (`409`)
+
 ### mock이 돌려주는 응답
 
 | 상황 | 응답 |
 | --- | --- |
-| `severity: high` | `202` + push `sent`, alimtalk `queued` |
-| `severity: medium` | `202` + push `sent`만 |
-| `user_response: dismissed` | 알림은 보내고 `severity`만 `medium`으로 낮춤 → push만 |
-| 같은 `request_id`로 다시 보냄 | `202` + 처음 응답 그대로 (다시 발송하지 않음) |
-| `user_id`가 `u_no_guardian` | `202` + `deliveries: []` (보호자 없음) |
+| POST 정상 | `202` + `alert_id`, 적용한 `severity`, `deliveries` (`high`: push `sent` + alimtalk `queued`, `medium`: push만) |
+| POST 같은 `request_id` | `202` + 처음 응답 그대로 (다시 발송하지 않음) |
+| PATCH 정상 | `200` + 같은 모양. `deliveries`에는 처음 발송과 추가 발송이 모두 들어감 |
+| PATCH 같은 `request_id` | `200` + 처음 응답 그대로 (후속 푸시를 다시 보내지 않음) |
+| PATCH 이미 최종 선택이 있음 | `409 ALREADY_RESPONDED` |
+| PATCH 없는 `alert_id` | `404 NOT_FOUND` |
+| PATCH `user_response: pending` | `400 INVALID_REQUEST` |
+| `user_id`가 `u_no_guardian` | `deliveries: []` (보호자 없음). severity 조정은 똑같이 함 |
 | `user_id`가 `u_unknown` | `404 USER_NOT_FOUND` |
-| 형식 오류 (UUID 아님, 없는 `type`·`severity`·`user_response`, 빈 `reason`·`evidence.text`, 시간대 없는 `detected_at` 등) | `400 INVALID_REQUEST` |
+| 형식 오류 (UUID 아님, 없는 enum 값, 빈 `reason`·`evidence.text`, 시간대 없는 시각 등) | `400 INVALID_REQUEST` |
 
 보호자는 사용자마다 `g_01` 한 명이 연결되어 있다고 가정합니다.
 
 > **mock에서 임시로 정한 것** (#37에서 확정되면 맞춰 고칩니다)
 >
-> - 형식 오류 코드는 모두 `INVALID_REQUEST`, 사용자 없음은 `USER_NOT_FOUND` (4번 명세에 에러 코드가 없음)
-> - 같은 `request_id` 재요청도 `202` (1번처럼 `200`으로 바꿀지 미정)
-> - `detected_at`은 시간대(`+09:00`)가 있어야 함 (공통 규칙 "한국 시간대 명시"를 따름)
+> - 낮출 때 취소한 알림톡은 `status: "cancelled"`로 보여 줌 (명세의 status 값에 아직 없음)
+> - 후속 푸시는 일반 push 항목과 같은 모양 (구분 필드 없음)
+> - POST 같은 `request_id` 재요청도 `202` (1번처럼 `200`으로 바꿀지 미정)
 > - `evidence.conversation_id`·`message_id`는 검사하지 않음 (표에 필수 표시가 없음)
-> - `no_response`여도 `severity`를 올리지 않고 A가 보낸 값 그대로 씀
-> - "같은 사용자·같은 `type` 10분 안 알림 합치기"는 회의 확정 전이라 넣지 않음. 매번 새 `alert_id`로 발송
-> - `dismissed`여도 알림을 보낼지, 방해 금지 시간에 `medium`을 미룰지는 회의에서 정하기로 해서, 지금은 명세 초안대로 항상 바로 보냄
+> - "같은 사용자·같은 `type` 10분 안 알림 합치기", 방해 금지 시간은 회의 확정 전이라 넣지 않음. 매번 바로 발송
 
 ### 확인·테스트용 (mock 전용, 실제 서버에는 없음)
 
-- `GET /alerts?user_id=u_123`: 받은 알림 목록. 실제로 적용된 `severity`(`dismissed`면 낮춘 값)와 원래 요청값 `requested_severity`도 함께 보임
+- `GET /alerts?user_id=u_123`: 받은 알림 목록. 지금 `severity`와 원래 요청값 `requested_severity`, `user_response`, `responded_at`도 함께 보임
 - `GET /health`, `X-Mock-Fail`, `X-Mock-Delay`: 1번 mock과 같음
 
 ## 테스트
@@ -134,6 +172,11 @@ curl -X POST http://127.0.0.1:8049/alerts -H "Content-Type: application/json" -d
 ```bash
 python -m unittest discover tools/mocks
 ```
+
+## 구조
+
+공통 코드(오류 형식, 응답 보내기, 테스트용 헤더, CORS, 실행)는 [_common.py](_common.py)에 있습니다.
+새 mock은 `MockHandler`를 상속해 `route()`만 채우면 됩니다 (명세 3·6·7 예정).
 
 ## 개인정보
 

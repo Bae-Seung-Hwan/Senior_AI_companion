@@ -1,7 +1,7 @@
 """긴급 알림 수신 API mock (명세 4, #49)
 
 A가 B의 실제 서버를 기다리지 않고 "사기·응급 감지 → 보호자 알림" 흐름을 개발할 수 있게 하는 가짜 서버.
-docs/api-contracts.md 4번 (PR #37 초안) 형식을 따른다. 실제로 푸시·알림톡을 보내지는 않고,
+docs/api-contracts.md 4번 (PR #37 초안, 0b778ee) 형식을 따른다. 실제로 푸시·알림톡을 보내지는 않고,
 보냈다고 가정한 결과(deliveries)만 돌려준다. 데이터는 메모리에만 저장하고, 끄면 사라진다.
 표준 라이브러리만 사용하므로 설치할 것이 없다.
 
@@ -11,9 +11,10 @@ docs/api-contracts.md 4번 (PR #37 초안) 형식을 따른다. 실제로 푸시
     python tools/mocks/alert_mock.py --host 0.0.0.0  # 같은 와이파이의 실기기에서 접속할 때
 
 엔드포인트:
-    POST /alerts            긴급 알림 요청 (명세 4)
-    GET  /alerts?user_id=…  받은 알림 보기 (mock 전용, 확인용)
-    GET  /health            살아 있는지 확인
+    POST  /alerts               4-1. 감지 즉시 긴급 알림 (보통 user_response: "pending")
+    PATCH /alerts/{alert_id}    4-2. 어르신의 선택 전달 → severity 조정, 필요하면 추가 발송
+    GET   /alerts?user_id=…     받은 알림 보기 (mock 전용, 확인용)
+    GET   /health               살아 있는지 확인
 
 테스트용 헤더 (mock 전용, 명세에는 없음):
     X-Mock-Fail: 500        5xx 응답을 강제로 돌려줌 → A의 재시도 정책 확인
@@ -24,104 +25,82 @@ docs/api-contracts.md 4번 (PR #37 초안) 형식을 따른다. 실제로 푸시
     u_no_guardian           보호자가 없음 → deliveries: []
 """
 
-import argparse
-import json
+import copy
 import threading
-import time
-import uuid
-from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from datetime import datetime
 
-KST = timezone(timedelta(hours=9))
+from _common import (
+    KST,
+    ApiError,
+    MockHandler,
+    invalid,
+    not_found,
+    parse_datetime,
+    require_text,
+    require_user,
+    require_uuid,
+    run,
+)
 
 TYPES = {"fraud", "emergency"}
 SEVERITIES = {"high", "medium"}
-USER_RESPONSES = {
+# pending을 뺀 최종 선택
+FINAL_RESPONSES = {
     "call_119_requested",
     "guardian_call_requested",
     "guardian_check_requested",
     "dismissed",
     "no_response",
 }
+USER_RESPONSES = FINAL_RESPONSES | {"pending"}
 
-# 이 user_id로 보내면 404 (사용자 없음) 응답
-UNKNOWN_USER_ID = "u_unknown"
 # 이 user_id로 보내면 보호자가 없는 것으로 보고 deliveries: [] 응답
 NO_GUARDIAN_USER_ID = "u_no_guardian"
 # 그 밖의 사용자는 보호자 한 명(g_01)이 연결되어 있다고 가정한다
 DEFAULT_GUARDIAN_ID = "g_01"
 
 
-class ApiError(Exception):
-    def __init__(self, status, code, message):
-        super().__init__(message)
-        self.status, self.code, self.message = status, code, message
+def adjusted_severity(alert_type, severity, user_response):
+    """명세 4 severity 규칙 (B가 적용).
+
+    - 사기 + dismissed → medium으로 낮춤
+    - 응급 + dismissed → 그대로 (안전 우선)
+    - 응급 + no_response → high로 올림
+    - 그 밖에는 그대로
+    """
+    if alert_type == "fraud" and user_response == "dismissed":
+        return "medium"
+    if alert_type == "emergency" and user_response == "no_response":
+        return "high"
+    return severity
 
 
-def bad(message):
-    return ApiError(400, "INVALID_REQUEST", message)
-
-
-def require_text(value, field):
-    if not isinstance(value, str) or not value.strip():
-        raise bad(f"{field}가 필요합니다")
-
-
-def parse_detected_at(value):
-    try:
-        at = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        raise bad("detected_at은 ISO 8601 시각이어야 합니다") from None
-    if at.tzinfo is None:
-        raise bad("detected_at에는 시간대가 있어야 합니다 (예: +09:00)")
-    return at
-
-
-def validate(body):
-    """요청을 검사한다. 오류면 ApiError를 던진다."""
+def validate_post(body):
     if not isinstance(body, dict):
-        raise bad("요청 본문은 JSON 객체여야 합니다")
-
-    try:
-        uuid.UUID(str(body.get("request_id")))
-    except ValueError:
-        raise bad("request_id는 UUID여야 합니다") from None
-
-    require_text(body.get("user_id"), "user_id")
-    if body["user_id"] == UNKNOWN_USER_ID:
-        raise ApiError(404, "USER_NOT_FOUND", "사용자를 찾을 수 없습니다")
-
+        raise invalid("요청 본문은 JSON 객체여야 합니다")
+    require_uuid(body.get("request_id"))
+    require_user(body.get("user_id"))
     if body.get("type") not in TYPES:
-        raise bad("type은 fraud / emergency 중 하나여야 합니다")
+        raise invalid("type은 fraud / emergency 중 하나여야 합니다")
     if body.get("severity") not in SEVERITIES:
-        raise bad("severity는 high / medium 중 하나여야 합니다")
+        raise invalid("severity는 high / medium 중 하나여야 합니다")
     require_text(body.get("reason"), "reason")
-
     evidence = body.get("evidence")
     if not isinstance(evidence, dict):
-        raise bad("evidence가 필요합니다")
+        raise invalid("evidence가 필요합니다")
     require_text(evidence.get("text"), "evidence.text")
-
     if body.get("user_response") not in USER_RESPONSES:
-        raise bad("user_response는 " + " / ".join(sorted(USER_RESPONSES)) + " 중 하나여야 합니다")
-
-    parse_detected_at(body.get("detected_at"))
-
-
-def effective_severity(body):
-    """명세: "괜찮아요"(dismissed)를 골라도 알림은 보내고, severity만 medium으로 낮춘다."""
-    return "medium" if body["user_response"] == "dismissed" else body["severity"]
+        raise invalid("user_response는 " + " / ".join(sorted(USER_RESPONSES)) + " 중 하나여야 합니다")
+    parse_datetime(body.get("detected_at"), "detected_at")
 
 
-def deliveries_for(user_id, severity):
-    """보냈다고 가정한 발송 결과. high는 앱 푸시 + 알림톡, medium은 앱 푸시만."""
-    if user_id == NO_GUARDIAN_USER_ID:
-        return []
-    out = [{"guardian_id": DEFAULT_GUARDIAN_ID, "channel": "push", "status": "sent"}]
-    if severity == "high":
-        out.append({"guardian_id": DEFAULT_GUARDIAN_ID, "channel": "alimtalk", "status": "queued"})
-    return out
+def validate_patch(body):
+    if not isinstance(body, dict):
+        raise invalid("요청 본문은 JSON 객체여야 합니다")
+    require_uuid(body.get("request_id"))
+    if body.get("user_response") not in FINAL_RESPONSES:
+        raise invalid("user_response는 " + " / ".join(sorted(FINAL_RESPONSES)) + " 중 하나여야 합니다 (pending 불가)")
+    parse_datetime(body.get("responded_at"), "responded_at")
 
 
 class Store:
@@ -130,115 +109,121 @@ class Store:
     def __init__(self, clock=lambda: datetime.now(KST)):
         self.clock = clock
         self.lock = threading.Lock()
-        self.by_request_id = {}
-        self.alerts = []
+        self.post_results = {}   # request_id → 응답
+        self.patch_results = {}  # request_id → 응답
+        self.alerts = {}         # alert_id → 알림 (등록 순서 유지)
+
+    # --- 발송 (흉내) ---
+
+    def _deliver(self, alert, channel):
+        if alert["user_id"] == NO_GUARDIAN_USER_ID:
+            return
+        status = "sent" if channel == "push" else "queued"
+        alert["deliveries"].append({"guardian_id": DEFAULT_GUARDIAN_ID, "channel": channel, "status": status})
+
+    def _has_alimtalk(self, alert):
+        return any(d["channel"] == "alimtalk" and d["status"] != "cancelled" for d in alert["deliveries"])
+
+    def _apply_severity(self, alert, severity):
+        """severity를 바꾸고 발송을 맞춘다. 이미 보낸(sent) 것은 취소하지 않는다."""
+        if severity == "high" and not self._has_alimtalk(alert):
+            self._deliver(alert, "alimtalk")  # 올릴 때는 알림톡 추가
+        if severity == "medium":
+            for d in alert["deliveries"]:
+                if d["channel"] == "alimtalk" and d["status"] == "queued":
+                    d["status"] = "cancelled"  # 낮출 때는 아직 안 보낸 알림톡만 취소
+        alert["severity"] = severity
+
+    @staticmethod
+    def _response(alert):
+        return copy.deepcopy({k: alert[k] for k in ("alert_id", "severity", "deliveries")})
+
+    # --- API ---
 
     def create(self, body):
-        """(HTTP 상태, 응답 본문) 을 돌려준다."""
+        """POST /alerts. (HTTP 상태, 응답 본문)을 돌려준다."""
         with self.lock:
             rid = body.get("request_id") if isinstance(body, dict) else None
-            if isinstance(rid, str) and rid in self.by_request_id:
-                return 202, self.by_request_id[rid]
+            if isinstance(rid, str) and rid in self.post_results:
+                return 202, self.post_results[rid]
 
-            validate(body)
-            severity = effective_severity(body)
-            resp = {
+            validate_post(body)
+            alert = {
                 "alert_id": f"al_{len(self.alerts) + 1:03d}",
-                "deliveries": deliveries_for(body["user_id"], severity),
-            }
-            self.by_request_id[rid] = resp
-            self.alerts.append({
-                **resp,
                 "user_id": body["user_id"],
                 "type": body["type"],
-                "severity": severity,  # dismissed면 낮춘 값
                 "requested_severity": body["severity"],
+                "severity": body["severity"],
                 "user_response": body["user_response"],
+                "deliveries": [],
                 "received_at": self.clock().isoformat(),
-                "request": body,
-            })
+                "responded_at": None,
+            }
+            # 처음부터 최종 선택을 알고 보냈으면 규칙을 먼저 적용 (이때는 4-2를 보내지 않음)
+            if body["user_response"] != "pending":
+                alert["responded_at"] = body["detected_at"]
+                alert["severity"] = adjusted_severity(alert["type"], alert["severity"], body["user_response"])
+            # 바로 발송: 푸시는 항상, high면 알림톡도
+            self._deliver(alert, "push")
+            if alert["severity"] == "high":
+                self._deliver(alert, "alimtalk")
+
+            self.alerts[alert["alert_id"]] = alert
+            resp = self._response(alert)
+            self.post_results[rid] = resp
             return 202, resp
+
+    def respond(self, alert_id, body):
+        """PATCH /alerts/{alert_id}. (HTTP 상태, 응답 본문)을 돌려준다."""
+        with self.lock:
+            alert = self.alerts.get(alert_id)
+            if alert is None:
+                raise not_found("없는 alert_id입니다")
+            rid = body.get("request_id") if isinstance(body, dict) else None
+            if isinstance(rid, str) and rid in self.patch_results:
+                return 200, self.patch_results[rid]
+
+            validate_patch(body)
+            if alert["user_response"] != "pending":
+                raise ApiError(409, "ALREADY_RESPONDED", "이미 최종 선택이 기록된 알림입니다")
+
+            choice = body["user_response"]
+            alert["user_response"] = choice
+            alert["responded_at"] = body["responded_at"]
+            self._apply_severity(alert, adjusted_severity(alert["type"], alert["severity"], choice))
+            if choice == "dismissed":
+                self._deliver(alert, "push")  # "어르신이 괜찮다고 응답하셨어요" 후속 푸시
+
+            resp = self._response(alert)
+            self.patch_results[rid] = resp
+            return 200, resp
 
     def list(self, user_id=None):
         with self.lock:
-            return [a for a in self.alerts if user_id in (None, a["user_id"])]
+            return [copy.deepcopy(a) for a in self.alerts.values() if user_id in (None, a["user_id"])]
 
 
 def make_handler(store):
-    class Handler(BaseHTTPRequestHandler):
-        def _send(self, status, payload):
-            data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(data)
+    class Handler(MockHandler):
+        log_name = "alert-mock"
+        allowed_methods = ("GET", "POST", "PATCH")
 
-        def _error(self, err):
-            self._send(err.status, {"error": {"code": err.code, "message": err.message}})
-
-        def _mock_headers(self):
-            delay = self.headers.get("X-Mock-Delay")
-            if delay:
-                time.sleep(min(float(delay), 30))
-            fail = self.headers.get("X-Mock-Fail")
-            if fail:
-                status = int(fail) if fail.isdigit() and 500 <= int(fail) < 600 else 500
-                self._error(ApiError(status, "MOCK_FAILURE", "X-Mock-Fail 헤더로 만든 가짜 장애입니다"))
-                return True
-            return False
-
-        def do_OPTIONS(self):  # 웹에서 호출할 때 CORS preflight
-            self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Mock-Fail, X-Mock-Delay")
-            self.end_headers()
-
-        def do_GET(self):
-            url = urlparse(self.path)
-            if url.path == "/health":
-                return self._send(200, {"ok": True})
-            if url.path == "/alerts":
-                user_id = parse_qs(url.query).get("user_id", [None])[0]
-                return self._send(200, {"alerts": store.list(user_id)})
-            self._error(ApiError(404, "NOT_FOUND", "없는 경로입니다"))
-
-        def do_POST(self):
-            if urlparse(self.path).path != "/alerts":
-                return self._error(ApiError(404, "NOT_FOUND", "없는 경로입니다"))
-            if self._mock_headers():
-                return
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(length).decode("utf-8") or "null")
-            except (ValueError, UnicodeDecodeError):
-                return self._error(bad("JSON 형식이 아닙니다"))
-            try:
-                status, resp = store.create(body)
-            except ApiError as err:
-                return self._error(err)
-            self._send(status, resp)
-
-        def log_message(self, fmt, *args):
-            # 감지 근거 발화(evidence.text)는 로그에 남기지 않는다 (민감정보 규칙). 경로와 상태만 출력
-            print(f"[alert-mock] {self.command} {self.path} → {args[1] if len(args) > 1 else ''}")
+        def route(self, method, path, query, body):
+            if path == "/alerts" and method == "POST":
+                return store.create(body)
+            if path == "/alerts" and method == "GET":
+                user_id = query.get("user_id", [None])[0]
+                return 200, {"alerts": store.list(user_id)}
+            parts = path.strip("/").split("/")
+            if method == "PATCH" and len(parts) == 2 and parts[0] == "alerts":
+                return store.respond(parts[1], body)
+            return super().route(method, path, query, body)
 
     return Handler
 
 
 def main():
-    ap = argparse.ArgumentParser(description="긴급 알림 수신 API mock (명세 4)")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8049)
-    args = ap.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(Store()))
-    print(f"긴급 알림 mock 실행 중: http://{args.host}:{args.port}  (끄려면 Ctrl+C)")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    run(make_handler(Store()), "긴급 알림 수신 API mock (명세 4)", 8049, "긴급 알림 mock")
 
 
 if __name__ == "__main__":
