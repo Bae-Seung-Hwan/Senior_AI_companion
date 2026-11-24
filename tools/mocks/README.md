@@ -98,8 +98,8 @@ curl -X POST http://127.0.0.1:8049/alerts -H "Content-Type: application/json" -d
   "alert_id": "al_001",
   "severity": "high",
   "deliveries": [
-    { "guardian_id": "g_01", "channel": "push", "status": "sent" },
-    { "guardian_id": "g_01", "channel": "alimtalk", "status": "queued" }
+    { "guardian_id": "u_789", "channel": "push", "status": "sent" },
+    { "guardian_id": "u_789", "channel": "alimtalk", "status": "queued" }
   ]
 }
 ```
@@ -119,9 +119,9 @@ curl -X PATCH http://127.0.0.1:8049/alerts/al_001 -H "Content-Type: application/
   "alert_id": "al_001",
   "severity": "medium",
   "deliveries": [
-    { "guardian_id": "g_01", "channel": "push", "status": "sent" },
-    { "guardian_id": "g_01", "channel": "alimtalk", "status": "canceled" },
-    { "guardian_id": "g_01", "channel": "push", "status": "sent" }
+    { "guardian_id": "u_789", "channel": "push", "status": "sent" },
+    { "guardian_id": "u_789", "channel": "alimtalk", "status": "canceled" },
+    { "guardian_id": "u_789", "channel": "push", "status": "sent" }
   ]
 }
 ```
@@ -152,7 +152,7 @@ curl -X PATCH http://127.0.0.1:8049/alerts/al_001 -H "Content-Type: application/
 | `user_id`가 `u_unknown` | `404 USER_NOT_FOUND` |
 | 형식 오류 (UUID 아님, 없는 enum 값, 빈 `reason`·`evidence.text`, 시간대 없는 시각 등) | `400 INVALID_REQUEST` |
 
-보호자는 사용자마다 `g_01` 한 명이 연결되어 있다고 가정합니다.
+보호자는 사용자마다 `u_789` 한 명이 연결되어 있다고 가정합니다. 보호자 ID도 어르신과 같은 `u_` 접두어를 씁니다 (B 제안, #67 명세 7 "ID 규칙").
 
 > **mock에서 임시로 정한 것** (#37에서 확정되면 맞춰 고칩니다)
 >
