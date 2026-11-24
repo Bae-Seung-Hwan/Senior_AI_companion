@@ -115,6 +115,9 @@ def validate(body, now):
     if hint is not None and hint not in TIME_HINTS:
         raise bad("INVALID_REQUEST", "time_hint는 morning / noon / evening / bedtime 중 하나여야 합니다")
 
+    if body.get("time") is not None and hint is not None:
+        raise bad("INVALID_REQUEST", "time과 time_hint는 둘 중 하나만 보내야 합니다")
+
     hm = None
     if body.get("time") is not None:
         hm = parse_hhmm(body["time"], "time")
@@ -197,9 +200,12 @@ def make_handler(store):
             self._send(err.status, {"error": {"code": err.code, "message": err.message}})
 
         def _mock_headers(self):
-            delay = self.headers.get("X-Mock-Delay")
-            if delay:
-                time.sleep(min(float(delay), 30))
+            try:
+                delay = float(self.headers.get("X-Mock-Delay") or 0)
+            except ValueError:
+                delay = 0  # 숫자가 아니면 무시 (예외로 연결이 끊기지 않게)
+            if delay > 0:
+                time.sleep(min(delay, 30))
             fail = self.headers.get("X-Mock-Fail")
             if fail:
                 status = int(fail) if fail.isdigit() and 500 <= int(fail) < 600 else 500
