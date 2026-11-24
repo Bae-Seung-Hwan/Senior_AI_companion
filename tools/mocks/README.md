@@ -101,7 +101,7 @@ curl -X POST http://127.0.0.1:8048/guardian-reports/daily -H "Content-Type: appl
 {
   "report_id": "r_001",
   "shared_sections": ["schedule", "health", "mood"],
-  "deliveries": [{ "guardian_id": "g_01", "channel": "push", "status": "queued" }]
+  "deliveries": [{ "guardian_id": "u_789", "channel": "push", "status": "queued" }]
 }
 ```
 

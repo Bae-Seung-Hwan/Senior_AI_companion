@@ -52,7 +52,7 @@ MOOD_LEVELS = {"good", "normal", "low"}
 
 NO_GUARDIAN_USER_ID = "u_no_guardian"
 SHARE_ALL_USER_ID = "u_share_all"
-DEFAULT_GUARDIAN_ID = "g_01"
+DEFAULT_GUARDIAN_ID = "u_789"
 
 
 def default_scope(user_id):

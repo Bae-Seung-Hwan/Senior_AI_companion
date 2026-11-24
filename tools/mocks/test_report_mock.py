@@ -16,8 +16,8 @@ from report_mock import KST, ApiError, Store, make_handler
 NOW = datetime(2026, 11, 22, 21, 0, 5, tzinfo=KST)
 HEALTH = "무릎이 조금 쑤신다고 하셔서 집에서 쉬셨어요."
 
-PUSH_QUEUED = {"guardian_id": "g_01", "channel": "push", "status": "queued"}
-PUSH_SENT = {"guardian_id": "g_01", "channel": "push", "status": "sent"}
+PUSH_QUEUED = {"guardian_id": "u_789", "channel": "push", "status": "queued"}
+PUSH_SENT = {"guardian_id": "u_789", "channel": "push", "status": "sent"}
 
 
 def req(**over):
