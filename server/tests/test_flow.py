@@ -1,5 +1,6 @@
 import datetime as dt
 import unittest
+from dataclasses import replace
 
 from companion.todos.b_client import (
     CREATED,
@@ -160,3 +161,62 @@ class FlowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixTest(unittest.TestCase):
+    """코드 리뷰에서 찾은 문제 (#22)."""
+
+    def test_등록에_실패하면_다시_말할_때_다시_제안(self):
+        api = FakeApi(RegisterResult(UNAVAILABLE))
+        c = conversation(FakeExtractor([DENTIST], [DENTIST]), api)
+        c.handle("…")
+        self.assertEqual(c.handle("네"), "지금은 등록이 잘 안 되네요. 조금 있다가 다시 말씀해 주세요.")
+        self.assertEqual(c.handle("내일 세 시 반 치과 예약 있어요"), "내일 오후 3시 반 치과 예약, 등록해 드릴까요?")
+        self.assertEqual(c.handle("네"), "내일 오후 3시 반 치과 예약, 등록해 두었어요.")
+        self.assertEqual(len(api.bodies), 2)
+        self.assertNotEqual(api.bodies[0]["request_id"], api.bodies[1]["request_id"])  # 새 등록 시도
+
+    def test_날짜가_지나서_실패하면_고친_날짜로_다시_제안(self):
+        fixed = replace(DENTIST, date=dt.date(2026, 11, 26))
+        c = conversation(FakeExtractor([DENTIST], [fixed]),
+                         FakeApi(RegisterResult(REJECTED, error_code="INVALID_DATE")))
+        c.handle("…")
+        c.handle("네")
+        self.assertEqual(c.handle("모레요"), "모레 오후 3시 반 치과 예약, 등록해 드릴까요?")
+
+    def test_제목이_같아도_날짜가_다르면_다른_할_일(self):
+        api = FakeApi()
+        next_week = replace(DENTIST, date=dt.date(2026, 12, 1))
+        c = conversation(FakeExtractor([DENTIST], [next_week]), api)
+        c.handle("…")
+        c.handle("네")
+        self.assertEqual(c.handle("다음 주 화요일에도 치과 예약 있어"),
+                         "12월 1일 화요일 오후 3시 반 치과 예약, 등록해 드릴까요?")
+
+    def test_등록한_할_일은_다시_말해도_제안하지_않음(self):
+        c = conversation(FakeExtractor([BANK], [BANK]))
+        c.handle("모레 은행 가야 해")
+        c.handle("오전 열 시")
+        c.handle("네")
+        self.assertIsNone(c.handle("모레 은행 가는 거 잊으면 안 돼"))  # 시각을 채우기 전 모양으로 다시 나와도
+
+    def test_확인_중에_말한_새_할_일은_뒤에_묻기(self):
+        api = FakeApi()
+        c = conversation(FakeExtractor([DENTIST], [BANK]), api)
+        c.handle("…")
+        self.assertEqual(c.handle("아 그리고 모레 은행 가야 해"), "등록해 드릴까요? 네, 아니요로 말씀해 주세요.")
+        self.assertEqual(c.handle("네"),
+                         "내일 오후 3시 반 치과 예약, 등록해 두었어요. 은행 가기는 몇 시로 알려 드릴까요?")
+
+    def test_두_번_못_알아들어도_새_할_일은_남김(self):
+        c = conversation(FakeExtractor([DENTIST], [], [BANK]))
+        c.handle("…")
+        c.handle("음...")
+        self.assertEqual(c.handle("모레 은행 가야 해"), "은행 가기는 몇 시로 알려 드릴까요?")
+
+    def test_거절한_뒤_그래도는_동의로_보지_않음(self):
+        api = FakeApi()
+        c = conversation(FakeExtractor([DENTIST]), api)
+        c.handle("…")
+        self.assertEqual(c.handle("그래도 안 할래요"), "알겠어요, 등록하지 않을게요.")
+        self.assertEqual(api.bodies, [])

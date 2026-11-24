@@ -102,6 +102,23 @@ class TodoApiTest(unittest.TestCase):
         self.assertEqual(self.register().status, USER_NOT_FOUND)
         self.assertEqual(self.slept, [])
 
+    def test_에러_본문이_객체가_아니어도_죽지_않음(self):
+        self.b.responses.append((400, {"error": "bad request"}))
+        self.assertEqual(self.register().status, REJECTED)
+        self.b.responses.append((409, ["x"]))
+        self.assertEqual(self.register().status, REJECTED)
+
+    def test_성공인데_객체가_아니면_재시도(self):
+        self.b.responses.extend([(201, ["x"]), (201, OK_BODY)])
+        result = self.register()
+        self.assertEqual((result.status, self.slept), (CREATED, [1]))
+
+    def test_음성용은_짧게_기다림(self):
+        api = TodoApi.for_voice(self.b.url, sleep=self.slept.append)
+        self.b.responses.extend([(503, error("X"))] * 2)
+        self.assertEqual(api.register({"request_id": "rid"}).status, UNAVAILABLE)
+        self.assertEqual((self.slept, len(self.b.received), api.timeout), ([1], 2, 3.0))
+
     def test_연결_안_됨(self):
         api = TodoApi("http://127.0.0.1:9", timeout=0.5, sleep=self.slept.append)
         self.assertEqual(api.register({"request_id": "rid"}).status, UNAVAILABLE)

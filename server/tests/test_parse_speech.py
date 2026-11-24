@@ -17,6 +17,14 @@ class YesNoTest(unittest.TestCase):
         for text in ("아니요", "아니 됐어", "괜찮아요", "하지 마", "필요 없어요", "나중에 할게", "싫어"):
             self.assertEqual(parse_yes_no(text), NO, text)
 
+    def test_흔한_거절_표현(self):
+        for text in ("하지 말아요", "안 할래요", "안 돼요", "그래도 안 할래요", "그건 됐고요", "싫다"):
+            self.assertEqual(parse_yes_no(text), NO, text)
+
+    def test_그래도는_동의가_아님(self):
+        self.assertIsNone(parse_yes_no("그래도 좀..."))
+        self.assertEqual(parse_yes_no("그래요"), YES)
+
     def test_unclear(self):
         for text in ("", "음...", "어제 병원 갔다 왔어", "손주가 왔어요"):
             self.assertIsNone(parse_yes_no(text), text)
@@ -39,6 +47,22 @@ class TimeAnswerTest(unittest.TestCase):
         }
         for text, expected in cases.items():
             self.assertEqual(parse_time_answer(text), expected, text)
+
+    def test_낮_점심은_오후(self):
+        self.assertEqual(parse_time_answer("점심 1시에"), dt.time(13, 0))
+        self.assertEqual(parse_time_answer("낮 3시"), dt.time(15, 0))
+        self.assertEqual(parse_time_answer("낮 12시"), dt.time(12, 0))
+        self.assertEqual(parse_time_answer("낮 11시"), dt.time(11, 0))
+
+    def test_고유어_분(self):
+        self.assertEqual(parse_time_answer("세 시 다섯 분"), dt.time(15, 5))
+        self.assertEqual(parse_time_answer("열 시 열다섯 분"), dt.time(10, 15))
+        self.assertEqual(parse_time_answer("두 시 스무 분"), None)  # "스무"는 아직 못 읽음 → 정각으로 바꾸지 않음
+        self.assertIsNone(parse_time_answer("두 시 몇 분"))
+
+    def test_시간은_시각이_아님(self):
+        self.assertIsNone(parse_time_answer("두 시간 있다가요"))
+        self.assertIsNone(parse_time_answer("한 시간 뒤에"))
 
     def test_hint(self):
         self.assertEqual(parse_time_answer("아침에요"), "morning")
@@ -77,6 +101,9 @@ class SpeechTest(unittest.TestCase):
     def test_registered_with_hint_says_actual_time(self):
         m = TodoDraft("medication", "혈압약", "…", time_hint="morning", repeat=Repeat("daily"))
         self.assertEqual(speech.registered(m, TODAY, "2026-11-25T08:00:00+09:00"),
+                         "매일 아침 혈압약, 등록해 두었어요. 오전 8시에 알려 드릴게요.")
+        # B가 UTC로 보내도 한국 시간으로 읽음
+        self.assertEqual(speech.registered(m, TODAY, "2026-11-24T23:00:00+00:00"),
                          "매일 아침 혈압약, 등록해 두었어요. 오전 8시에 알려 드릴게요.")
         self.assertEqual(speech.registered(m, TODAY, None),
                          "혈압약, 등록해 두었어요. 시간이 정해지면 말씀해 주세요.")

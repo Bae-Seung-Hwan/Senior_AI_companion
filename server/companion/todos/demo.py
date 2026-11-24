@@ -31,7 +31,7 @@ def main():
         user_id=args.user,
         conversation_id=f"c_demo_{uuid.uuid4().hex[:6]}",
         extractor=ClaudeTodoExtractor(model=args.model),
-        api=TodoApi(args.b_url),
+        api=TodoApi.for_voice(args.b_url),
     )
     print("어르신 역할로 말해 보세요. (예: 내일 오후 세 시 반에 치과 예약 있어요)")
     n = 0

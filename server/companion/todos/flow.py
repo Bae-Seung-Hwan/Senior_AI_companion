@@ -21,12 +21,10 @@ from dataclasses import replace
 from . import speech
 from .b_client import CREATED, DUPLICATE, REJECTED, REPLAYED, USER_NOT_FOUND, TodoApi
 from .extract import ExtractionError
-from .models import TodoDraft
+from .models import KST, TodoDraft
 from .parse import NO, UNKNOWN_TIME, YES, parse_time_answer, parse_yes_no
 
 log = logging.getLogger(__name__)
-
-KST = dt.timezone(dt.timedelta(hours=9))
 
 ASK_TIME = "ask_time"
 CONFIRM = "confirm"
@@ -52,9 +50,12 @@ class TodoConversation:
 
         self.queue: deque[TodoDraft] = deque()
         self.current: TodoDraft | None = None
+        self.current_origin_key: tuple | None = None  # 시각을 묻기 전, 처음 뽑았을 때의 key
         self.stage: str | None = None
         self.unclear_count = 0
-        self.proposed: set[str] = set()  # 같은 대화에서 같은 할 일을 다시 제안하지 않음
+        # 끝난 할 일(등록함, 이미 있음, 어르신이 거절함). 같은 대화에서 다시 제안하지 않는다.
+        # 등록에 실패한 것은 넣지 않는다 → "다시 말씀해 주세요" 뒤에 다시 말하면 다시 제안
+        self.settled: set[tuple] = set()
         self.recent: deque[str] = deque(maxlen=4)
 
     @property
@@ -74,15 +75,7 @@ class TodoConversation:
     # --- 단계별 처리 ---
 
     def _on_utterance(self, text: str, message_id: str | None) -> str | None:
-        try:
-            drafts = self.extractor.extract(text, self.today, message_id=message_id, recent=tuple(self.recent))
-        except ExtractionError:
-            return None  # 할 일 제안만 건너뛰고 대화는 계속
-        for draft in drafts:
-            key = draft.title
-            if key not in self.proposed:
-                self.proposed.add(key)
-                self.queue.append(draft)
+        self._collect(text, message_id)
         return self._next()
 
     def _on_time_answer(self, text: str) -> str:
@@ -104,18 +97,37 @@ class TodoConversation:
             nxt = self._next()
             return f"{reply} {nxt}" if nxt else reply
         if answer == NO:
-            self._clear()
+            self._settle()
             nxt = self._next()
             return f"{speech.declined()} {nxt}" if nxt else speech.declined()
+        # 네/아니요가 아님. 그 말에 새 할 일이 있을 수 있으니 뽑아서 뒤에 줄 세운다
+        self._collect(text, message_id)
         if self.unclear_count == 0:
             self.unclear_count = 1
             return speech.ask_again()
-        # 두 번 알아듣지 못하면 등록하지 않고 접는다. 다른 이야기를 하신 것일 수 있으니 일반 발화로 처리
-        self._clear()
-        self.queue.clear()
-        return self._on_utterance(text, message_id)
+        # 두 번 알아듣지 못하면 이 할 일은 등록하지 않고 접는다 (끝난 것으로 치지 않음)
+        return self._next()
 
     # --- 도우미 ---
+
+    def _collect(self, text: str, message_id: str | None):
+        """발화에서 할 일을 뽑아 대기열에 넣는다. 끝났거나 이미 기다리는 것은 뺀다."""
+        try:
+            drafts = self.extractor.extract(text, self.today, message_id=message_id, recent=tuple(self.recent))
+        except ExtractionError:
+            return  # 할 일 제안만 건너뛰고 대화는 계속
+        waiting = {d.key for d in self.queue} | {self.current_origin_key}
+        if self.current is not None:
+            waiting.add(self.current.key)
+        for draft in drafts:
+            if draft.key not in self.settled and draft.key not in waiting:
+                waiting.add(draft.key)
+                self.queue.append(draft)
+
+    def _settle(self):
+        """지금 할 일을 끝난 것으로 기록 (처음 뽑은 모양과 시각을 채운 모양 둘 다)."""
+        self.settled.add(self.current.key)
+        self.settled.add(self.current_origin_key)
 
     def _next(self) -> str | None:
         """대기 중인 다음 할 일을 꺼내 질문한다."""
@@ -123,6 +135,7 @@ class TodoConversation:
         if not self.queue:
             return None
         self.current = self.queue.popleft()
+        self.current_origin_key = self.current.key
         if self.current.needs_time:
             self.stage = ASK_TIME
             return speech.ask_time_question(self.current)
@@ -131,6 +144,7 @@ class TodoConversation:
 
     def _clear(self):
         self.current = None
+        self.current_origin_key = None
         self.stage = None
         self.unclear_count = 0
 
@@ -140,8 +154,10 @@ class TodoConversation:
         )
         result = self.api.register(body)
         if result.status in (CREATED, REPLAYED):
+            self._settle()
             return speech.registered(draft, self.today, result.todo.get("next_at"))
         if result.status == DUPLICATE:
+            self._settle()
             return speech.already_registered(draft)
         if result.status == REJECTED:
             log.info("할 일 등록 거절: %s", result.error_code)

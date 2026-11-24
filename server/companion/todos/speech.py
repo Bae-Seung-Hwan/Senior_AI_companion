@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from .models import WEEKDAYS, TodoDraft
+from .models import KST, WEEKDAYS, TodoDraft
 
 _WEEKDAY_KO = dict(zip(WEEKDAYS, "월화수목금토일", strict=True))
 _HINT_KO = {"morning": "아침", "noon": "점심", "evening": "저녁", "bedtime": "주무시기 전"}
@@ -93,6 +93,8 @@ def registered(draft: TodoDraft, today: dt.date, next_at: str | None) -> str:
     if draft.time is None:
         # time_hint는 B가 사용자별 기본 시각으로 바꿈 → 실제로 알릴 시각을 알려 드림
         at = dt.datetime.fromisoformat(next_at)
+        if at.tzinfo is not None:
+            at = at.astimezone(KST)  # B가 다른 시간대로 보내도 한국 시간으로 읽어 드림
         text += f" {time_phrase(at.time())}에 알려 드릴게요."
     return text
 

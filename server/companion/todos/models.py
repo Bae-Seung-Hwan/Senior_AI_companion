@@ -8,6 +8,7 @@ from dataclasses import dataclass
 KINDS = ("appointment", "medication", "task")
 TIME_HINTS = ("morning", "noon", "evening", "bedtime")
 WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+KST = dt.timezone(dt.timedelta(hours=9))
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,11 @@ class TodoDraft:
     time_hint: str | None = None  # "아침에"처럼 대략만 말했을 때
     repeat: Repeat | None = None
     message_id: str | None = None  # 이 할 일이 나온 발화
+
+    @property
+    def key(self) -> tuple:
+        """같은 할 일인지 판단하는 값. 제목이 같아도 날짜·시각·반복이 다르면 다른 할 일."""
+        return (self.title, self.date, self.time, self.time_hint, self.repeat)
 
     @property
     def needs_time(self) -> bool:
