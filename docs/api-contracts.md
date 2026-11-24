@@ -18,7 +18,7 @@
 
 - **형식**: HTTP + JSON. 서버를 하나로 합치면 같은 모양의 함수 호출로 바꿔도 됩니다
 - **시각**: ISO 8601, 한국 시간대 명시 (`2026-11-23T15:30:00+09:00`). 날짜만 있으면 `YYYY-MM-DD`
-- **사용자 식별**: `user_id` (문자열, 7번 회원 API 기준)
+- **사용자 식별**: `user_id` (문자열, 7번 회원 API 기준). **보호자도 같은 `u_` 접두어**를 씁니다 (예: 어르신 `u_123`, 보호자 `u_789`). 보호자도 B DB `users`의 한 줄이기 때문입니다 (B 제안 #67, 회의 #68에서 확정)
 - **재시도 안전성**: 모든 쓰기 요청에 `request_id`(UUID)를 넣습니다. 같은 `request_id`로 다시 보내면 B는 새로 만들지 않고 처음 결과를 그대로 돌려줍니다
 - **에러 응답**:
 
@@ -40,6 +40,35 @@
   | `INVALID_REQUEST` | 400 | 형식 오류 (UUID 아님, 없는 enum 값, 필수 필드 없음, 시간대 없는 시각 등). 항목별 코드가 따로 없을 때 씀 |
   | `USER_NOT_FOUND` | 404 | `user_id`에 해당하는 사용자가 없음 |
   | `NOT_FOUND` | 404 | 경로나 대상(`alert_id` 등)이 없음 |
+
+- **보호자 발송 기록 (`deliveries`)**: 3번·4번 응답에 공통으로 들어갑니다. 보호자 한 명에게 보내는 푸시 하나가 한 줄입니다
+
+  | 필드 | 타입 | 필수 | 설명 |
+  | --- | --- | --- | --- |
+  | `guardian_id` | string | O | 받는 보호자 (`u_`) |
+  | `channel` | `"push"` | O | MVP는 앱 푸시만 (알림톡은 MVP 이후) |
+  | `kind` | 아래 표 참고 | O | 무엇을 보내는 푸시인지 |
+  | `priority` | `"urgent"` \| `"normal"` | O | `urgent`: 긴급 알림 채널 (소리 + 화면 켜짐, iOS time-sensitive, 방해 금지 무시). `normal`: 일반 알림 |
+  | `status` | 아래 표 참고 | O | |
+  | `scheduled_at` | 시각 \| null | O | 보낼 예정 시각. `scheduled`와 아직 보내지 않은 `re_alert`에만 값이 있음 |
+
+  | `kind` | 쓰는 곳 | 의미 |
+  | --- | --- | --- |
+  | `report` | 3번 | 하루 요약 |
+  | `alert` | 4번 | 긴급 알림. 처음 발송과, severity를 올려서 다시 보낸 긴급 푸시 |
+  | `re_alert` | 4번 | 보호자가 `alert`를 열어 보지 않았을 때 5분 뒤 재알림 (`high`만) |
+  | `follow_up` | 4번 | 어르신의 선택을 알리는 후속 푸시 (예: "어르신이 괜찮다고 응답하셨어요") |
+
+  | `status` | 의미 |
+  | --- | --- |
+  | `queued` | 보낼 차례를 기다림 (방해 금지 시간이라 아침까지 미룬 것, 아직 때가 안 된 `re_alert` 포함) |
+  | `scheduled` | 나중에 묶어서 보냄 (무료 등급 하루 요약은 주 1회). `scheduled_at`에 보낼 예정 시각 |
+  | `sent` | 보냄 |
+  | `failed` | 보내지 못함 |
+  | `canceled` | 보내기 전에 취소함 (보호자가 이미 열어 봐서, 또는 severity를 낮춰서 필요 없어진 `re_alert`) |
+
+  - **이미 보낸(`sent`) 푸시는 취소하지 않습니다.** `canceled`는 아직 보내지 않은 것에만 씁니다
+  - 상태가 바뀌어도 줄을 지우지 않습니다. 4-2 응답에는 4-1 때의 줄이 바뀐 상태로 함께 들어갑니다
 
 - **민감정보**: 대화 원문은 꼭 필요한 필드(`original_text`, `evidence.text`)에만 담고, B는 이 필드를 로그에 남기지 않습니다
 
@@ -170,7 +199,8 @@ A가 매일 요약 배치를 돌린 뒤 사용자마다 한 번 호출합니다.
 | `sections.health` | string \| null | | 보호자에게는 건강 공유에 동의했을 때만 전달 |
 | `sections.mood` | string \| null | | 보호자에게는 기분 공유에 동의했을 때만 전달 |
 | `mood_level` | `"good"` \| `"normal"` \| `"low"` | O | 보호자에게는 기분 공유에 동의했을 때만 전달. 며칠째 `low`인지 판단하는 데도 사용 |
-| `stats` | object | | 보호자 화면 통계용 |
+| `stats.conversation_count` | integer | | 그날 대화 횟수. 보호자에게 항상 전달 (안부 확인용, 대화 내용은 없음) |
+| `stats.completed_todos` | integer | | 그날 끝낸 할 일 수. 보호자에게는 **일정 공유에 동의했을 때만** 전달 (할 일 수도 일정 정보라서, A 제안) |
 
 - **A는 동의 여부와 상관없이 모든 항목을 채워 보내고, 보호자에게 넘길지는 B가 거릅니다.** "필수"는 A가 보낼 때 기준입니다
 - **보호자 푸시 알림 본문에는 `brief`만** 넣습니다. `sections`는 보호자가 앱을 열었을 때만 보입니다 (잠금 화면에 보일 수 있어서. 4번 `evidence.text`와 같은 규칙)
@@ -186,20 +216,13 @@ A가 매일 요약 배치를 돌린 뒤 사용자마다 한 번 호출합니다.
   "report_id": "r_001",
   "shared_sections": ["schedule", "mood"],
   "deliveries": [
-    { "guardian_id": "g_01", "channel": "push", "status": "queued" },
-    { "guardian_id": "g_02", "channel": "push", "status": "scheduled", "scheduled_at": "2026-11-29T21:00:00+09:00" }
+    { "guardian_id": "u_789", "channel": "push", "kind": "report", "priority": "normal", "status": "queued", "scheduled_at": null },
+    { "guardian_id": "u_790", "channel": "push", "kind": "report", "priority": "normal", "status": "scheduled", "scheduled_at": "2026-11-29T21:00:00+09:00" }
   ]
 }
 ```
 
-| `deliveries[].status` | 의미 |
-| --- | --- |
-| `queued` | 곧 보냄 |
-| `sent` | 보냄 |
-| `failed` | 보내지 못함 |
-| `scheduled` | 나중에 묶어서 보냄 (무료 등급은 주 1회). `scheduled_at`에 보낼 예정 시각 |
-
-- `channel`은 MVP에서는 `push`만 씁니다 (알림톡은 MVP 이후)
+- `deliveries`의 필드와 상태는 공통 규칙 "보호자 발송 기록"을 따릅니다. 하루 요약은 항상 `kind: "report"`, `priority: "normal"`입니다
 - 보호자가 없으면 `deliveries: []`. A는 에러로 처리하지 않습니다 (요약은 어르신 화면에도 쓰임)
 
 ## 4. 긴급 알림 (A → B)
@@ -257,15 +280,15 @@ A가 매일 요약 배치를 돌린 뒤 사용자마다 한 번 호출합니다.
   "alert_id": "al_001",
   "severity": "high",
   "deliveries": [
-    { "guardian_id": "g_01", "channel": "push", "status": "sent" },
-    { "guardian_id": "g_02", "channel": "push", "status": "sent" }
+    { "guardian_id": "u_789", "channel": "push", "kind": "alert", "priority": "urgent", "status": "sent", "scheduled_at": null },
+    { "guardian_id": "u_789", "channel": "push", "kind": "re_alert", "priority": "urgent", "status": "queued", "scheduled_at": "2026-11-22T14:10:12+09:00" }
   ]
 }
 ```
 
 - `severity`는 B가 실제로 적용한 값입니다 (아래 규칙 적용 후)
-- `channel`은 MVP에서는 `push`만 씁니다 (알림톡은 MVP 이후)
-- **보호자가 없거나 모든 발송이 실패하면** `deliveries`가 비어 있거나 전부 `failed`입니다. 이때 A는 응급이면 어르신에게 119에 직접 전화하도록 다시 안내합니다. 재시도를 다 해도 POST가 실패했을 때도 똑같이 안내합니다
+- `deliveries`의 필드와 상태는 공통 규칙 "보호자 발송 기록"을 따릅니다. 위 예시는 `high`라서 긴급 푸시를 바로 보내고, 5분 뒤 재알림을 걸어 둔 상태입니다
+- **보호자가 없거나 모든 발송이 실패하면** `deliveries`가 비어 있거나 `kind: "alert"`인 줄이 전부 `failed`입니다. 이때 A는 응급이면 어르신에게 119에 직접 전화하도록 다시 안내합니다. 재시도를 다 해도 POST가 실패했을 때도 똑같이 안내합니다
 - 같은 사용자의 같은 `type` 알림이 10분 안에 또 오면 B가 하나로 합칠 수 있습니다 (중복 알림 방지, 회의에서 확정)
 
 ### 4-2. 어르신의 선택: `PATCH /alerts/{alert_id}`
@@ -286,6 +309,20 @@ A가 매일 요약 배치를 돌린 뒤 사용자마다 한 번 호출합니다.
 
 응답 `200 OK`: 4-1과 같은 모양. `deliveries`에는 처음 발송과 이번에 추가로 보낸 것이 모두 들어갑니다.
 
+예: 위 사기 알림(`high`)에 어르신이 "괜찮아요"(`dismissed`)를 고른 경우. `medium`으로 낮추면서 아직 안 보낸 재알림을 취소하고, 후속 푸시를 보냅니다.
+
+```json
+{
+  "alert_id": "al_001",
+  "severity": "medium",
+  "deliveries": [
+    { "guardian_id": "u_789", "channel": "push", "kind": "alert", "priority": "urgent", "status": "sent", "scheduled_at": null },
+    { "guardian_id": "u_789", "channel": "push", "kind": "re_alert", "priority": "urgent", "status": "canceled", "scheduled_at": "2026-11-22T14:10:12+09:00" },
+    { "guardian_id": "u_789", "channel": "push", "kind": "follow_up", "priority": "normal", "status": "sent", "scheduled_at": null }
+  ]
+}
+```
+
 에러 코드 (공통 코드 외):
 
 | 코드 | HTTP | 언제 |
@@ -301,7 +338,7 @@ MVP는 앱 푸시만 쓰므로 `high`와 `medium`은 푸시를 보내는 방식�
 | --- | --- | --- |
 | 푸시 종류 | 긴급 알림 채널 (소리 + 화면 켜짐, iOS는 time-sensitive) | 일반 알림 |
 | 방해 금지 시간 | 무시하고 바로 보냄 | 아침까지 미룸 |
-| 보호자가 안 열어 봤을 때 | 5분 뒤 한 번 더 보냄 (재알림) | 다시 보내지 않음 |
+| 보호자가 안 열어 봤을 때 | 5분 뒤 한 번 더 보냄 (`re_alert`). 그 전에 열어 보면 `canceled` | 다시 보내지 않음 |
 
 - iOS critical alert(무음 모드에서도 소리 남)는 Apple 별도 승인이 필요해서 MVP에서는 쓰지 않습니다
 
@@ -317,8 +354,8 @@ A는 감지 결과로만 `severity`를 정해 보내고, **어르신의 선택�
 | `no_response` | 그대로 | **`high`로 올림** (가장 위험한 상황으로 봄) |
 
 - **이미 보낸 알림은 취소하지 않습니다.** 낮출 때는 아직 보내지 않은 재알림만 취소합니다
-- 올릴 때(`medium` → `high`)는 그때 긴급 푸시를 다시 보냅니다
-- `dismissed`면 보호자에게 "어르신이 괜찮다고 응답하셨어요" 후속 푸시를 보냅니다. 그 밖의 선택도 보호자 앱의 알림 상세에 표시합니다
+- 올릴 때(`medium` → `high`)는 그때 긴급 푸시(`kind: "alert"`, `priority: "urgent"`)를 다시 보내고 재알림을 겁니다
+- `dismissed`면 보호자에게 "어르신이 괜찮다고 응답하셨어요" 후속 푸시(`kind: "follow_up"`)를 보냅니다. 그 밖의 선택도 보호자 앱의 알림 상세에 표시합니다
 
 ## 5. 모임 목록 조회 (B → A)
 
@@ -349,3 +386,5 @@ A는 감지 결과로만 `severity`를 정해 보내고, **어르신의 선택�
 - [ ] 가입 때 "긴급 알림" 동의를 공유 범위와 따로 받을지 (4번이 공유 범위와 상관없이 동작하려면 필요. B #41)
 - [ ] 방해 금지 시간: `high`는 밤에도 보내고 `medium`은 아침까지 미루는 안 (위 "severity별 발송 방식" 표) 확정
 - [ ] 방해 금지 시간대 기본값 (예: 22:00~07:00)
+- [ ] 보호자 ID도 `u_` 접두어로 통일 (B 제안 #67. 이 명세 예시는 `u_789`로 맞춰 둠)
+- [ ] 하루 요약 `stats.completed_todos`는 일정 공유에 동의했을 때만 전달 (A 제안)
