@@ -1,8 +1,9 @@
 """긴급 알림 수신 API mock (명세 4, #49)
 
 A가 B의 실제 서버를 기다리지 않고 "사기·응급 감지 → 보호자 알림" 흐름을 개발할 수 있게 하는 가짜 서버.
-docs/api-contracts.md 4번 (PR #37 초안, 0b778ee) 형식을 따른다. 실제로 푸시·알림톡을 보내지는 않고,
-보냈다고 가정한 결과(deliveries)만 돌려준다. 데이터는 메모리에만 저장하고, 끄면 사라진다.
+docs/api-contracts.md 4번과 공통 규칙 "보호자 발송 기록" (PR #37 초안, 557c732) 형식을 따른다.
+MVP는 앱 푸시만 쓴다. 실제로 푸시를 보내지는 않고, 보냈다고 가정한 결과(deliveries)만 돌려준다.
+데이터는 메모리에만 저장하고, 끄면 사라진다.
 표준 라이브러리만 사용하므로 설치할 것이 없다.
 
 사용법:
@@ -13,6 +14,8 @@ docs/api-contracts.md 4번 (PR #37 초안, 0b778ee) 형식을 따른다. 실제�
 엔드포인트:
     POST  /alerts               4-1. 감지 즉시 긴급 알림 (보통 user_response: "pending")
     PATCH /alerts/{alert_id}    4-2. 어르신의 선택 전달 → severity 조정, 필요하면 추가 발송
+    POST  /alerts/{alert_id}/opened
+                                보호자가 알림을 열어 봄 (mock 전용) → 아직 안 보낸 재알림 취소
     GET   /alerts?user_id=…     받은 알림 보기 (mock 전용, 확인용)
     GET   /health               살아 있는지 확인
 
@@ -23,11 +26,12 @@ docs/api-contracts.md 4번 (PR #37 초안, 0b778ee) 형식을 따른다. 실제�
 테스트용 user_id (mock 전용):
     u_unknown               404 USER_NOT_FOUND
     u_no_guardian           보호자가 없음 → deliveries: []
+    u_push_fail             푸시 발송이 모두 실패함 → kind: "alert"가 전부 failed (A가 119 직접 전화 안내)
 """
 
 import copy
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from _common import (
     KST,
@@ -56,8 +60,12 @@ USER_RESPONSES = FINAL_RESPONSES | {"pending"}
 
 # 이 user_id로 보내면 보호자가 없는 것으로 보고 deliveries: [] 응답
 NO_GUARDIAN_USER_ID = "u_no_guardian"
+# 이 user_id로 보내면 푸시 발송이 모두 실패한 것으로 본다
+PUSH_FAIL_USER_ID = "u_push_fail"
 # 그 밖의 사용자는 보호자 한 명(u_789)이 연결되어 있다고 가정한다
 DEFAULT_GUARDIAN_ID = "u_789"
+# high 알림을 보호자가 열어 보지 않았을 때 재알림까지 걸리는 시간
+RE_ALERT_AFTER = timedelta(minutes=5)
 
 
 def adjusted_severity(alert_type, severity, user_response):
@@ -110,29 +118,53 @@ class Store:
         self.clock = clock
         self.lock = threading.Lock()
         self.post_results = {}   # request_id → 응답
-        self.patch_results = {}  # request_id → 응답
+        self.patch_results = {}  # request_id → (alert_id, 응답)
         self.alerts = {}         # alert_id → 알림 (등록 순서 유지)
 
     # --- 발송 (흉내) ---
 
-    def _deliver(self, alert, channel):
+    def _push(self, alert, kind, priority):
+        """푸시 한 건을 deliveries에 남긴다. 보호자가 없으면 아무것도 하지 않는다."""
         if alert["user_id"] == NO_GUARDIAN_USER_ID:
             return
-        status = "sent" if channel == "push" else "queued"
-        alert["deliveries"].append({"guardian_id": DEFAULT_GUARDIAN_ID, "channel": channel, "status": status})
+        failed = alert["user_id"] == PUSH_FAIL_USER_ID
+        alert["deliveries"].append({
+            "guardian_id": DEFAULT_GUARDIAN_ID,
+            "channel": "push",
+            "kind": kind,
+            "priority": priority,
+            "status": "failed" if failed else "sent",
+            "scheduled_at": None,
+        })
+        if kind == "alert" and priority == "urgent" and not failed:
+            # 5분 안에 열어 보지 않으면 한 번 더 보냄 (high만). 보내기 전이라 queued
+            alert["deliveries"].append({
+                "guardian_id": DEFAULT_GUARDIAN_ID,
+                "channel": "push",
+                "kind": "re_alert",
+                "priority": "urgent",
+                "status": "queued",
+                "scheduled_at": (self.clock() + RE_ALERT_AFTER).isoformat(),
+            })
 
-    def _has_alimtalk(self, alert):
-        return any(d["channel"] == "alimtalk" and d["status"] != "canceled" for d in alert["deliveries"])
+    def _send_alert(self, alert):
+        """긴급 알림 푸시. high는 긴급 채널 + 재알림, medium은 일반 알림만."""
+        self._push(alert, "alert", "urgent" if alert["severity"] == "high" else "normal")
+
+    @staticmethod
+    def _cancel_re_alerts(alert):
+        """아직 보내지 않은 재알림만 취소한다. 이미 보낸(sent) 푸시는 취소하지 않는다."""
+        for d in alert["deliveries"]:
+            if d["kind"] == "re_alert" and d["status"] == "queued":
+                d["status"] = "canceled"
 
     def _apply_severity(self, alert, severity):
-        """severity를 바꾸고 발송을 맞춘다. 이미 보낸(sent) 것은 취소하지 않는다."""
-        if severity == "high" and not self._has_alimtalk(alert):
-            self._deliver(alert, "alimtalk")  # 올릴 때는 알림톡 추가
-        if severity == "medium":
-            for d in alert["deliveries"]:
-                if d["channel"] == "alimtalk" and d["status"] == "queued":
-                    d["status"] = "canceled"  # 낮출 때는 아직 안 보낸 알림톡만 취소
-        alert["severity"] = severity
+        """severity를 바꾸고 발송을 맞춘다."""
+        before, alert["severity"] = alert["severity"], severity
+        if before == "medium" and severity == "high":
+            self._send_alert(alert)  # 올릴 때: 긴급 푸시를 다시 보내고 재알림을 건다
+        elif before == "high" and severity == "medium":
+            self._cancel_re_alerts(alert)  # 낮출 때: 아직 안 보낸 재알림만 취소
 
     @staticmethod
     def _response(alert):
@@ -163,10 +195,8 @@ class Store:
             if body["user_response"] != "pending":
                 alert["responded_at"] = body["detected_at"]
                 alert["severity"] = adjusted_severity(alert["type"], alert["severity"], body["user_response"])
-            # 바로 발송: 푸시는 항상, high면 알림톡도
-            self._deliver(alert, "push")
-            if alert["severity"] == "high":
-                self._deliver(alert, "alimtalk")
+            # 바로 발송: high는 긴급 채널 + 재알림, medium은 일반 알림
+            self._send_alert(alert)
 
             self.alerts[alert["alert_id"]] = alert
             resp = self._response(alert)
@@ -181,7 +211,11 @@ class Store:
                 raise not_found("없는 alert_id입니다")
             rid = body.get("request_id") if isinstance(body, dict) else None
             if isinstance(rid, str) and rid in self.patch_results:
-                return 200, self.patch_results[rid]
+                done_alert_id, resp = self.patch_results[rid]
+                if done_alert_id != alert_id:
+                    # 다른 알림에 쓴 request_id를 재사용하면 A의 재시도 버그일 가능성이 커서 거절한다
+                    raise invalid(f"request_id가 이미 다른 알림({done_alert_id})에 쓰였습니다")
+                return 200, resp
 
             validate_patch(body)
             if alert["user_response"] != "pending":
@@ -192,11 +226,20 @@ class Store:
             alert["responded_at"] = body["responded_at"]
             self._apply_severity(alert, adjusted_severity(alert["type"], alert["severity"], choice))
             if choice == "dismissed":
-                self._deliver(alert, "push")  # "어르신이 괜찮다고 응답하셨어요" 후속 푸시
+                self._push(alert, "follow_up", "normal")  # "어르신이 괜찮다고 응답하셨어요"
 
             resp = self._response(alert)
-            self.patch_results[rid] = resp
+            self.patch_results[rid] = (alert_id, resp)
             return 200, resp
+
+    def open(self, alert_id):
+        """POST /alerts/{alert_id}/opened (mock 전용). 보호자가 알림을 열어 본 것으로 보고 재알림을 취소한다."""
+        with self.lock:
+            alert = self.alerts.get(alert_id)
+            if alert is None:
+                raise not_found("없는 alert_id입니다")
+            self._cancel_re_alerts(alert)
+            return 200, self._response(alert)
 
     def list(self, user_id=None):
         with self.lock:
@@ -217,6 +260,8 @@ def make_handler(store):
             parts = path.strip("/").split("/")
             if method == "PATCH" and len(parts) == 2 and parts[0] == "alerts":
                 return store.respond(parts[1], body)
+            if method == "POST" and len(parts) == 3 and parts[0] == "alerts" and parts[2] == "opened":
+                return store.open(parts[1])
             return super().route(method, path, query, body)
 
     return Handler

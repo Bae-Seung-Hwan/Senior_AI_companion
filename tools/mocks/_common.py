@@ -22,9 +22,10 @@ MAX_MOCK_DELAY = 30  # X-Mock-Delay 최대 초
 class ApiError(Exception):
     """명세 공통 에러 응답: {"error": {"code": …, "message": …}}"""
 
-    def __init__(self, status, code, message):
+    def __init__(self, status, code, message, **extra):
         super().__init__(message)
         self.status, self.code, self.message = status, code, message
+        self.extra = extra  # 에러 본문에 더 넣을 필드 (예: existing_todo_id)
 
 
 def invalid(message):
@@ -89,7 +90,7 @@ class MockHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _error(self, err):
-        self._send(err.status, {"error": {"code": err.code, "message": err.message}})
+        self._send(err.status, {"error": {"code": err.code, "message": err.message, **getattr(err, "extra", {})}})
 
     # --- 테스트용 헤더 (mock 전용, 명세에는 없음) ---
 
