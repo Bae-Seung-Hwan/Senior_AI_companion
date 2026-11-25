@@ -263,6 +263,7 @@ curl http://127.0.0.1:8042/users/u_123
   "role": "senior",
   "display_name": "김영자 님",
   "timezone": "Asia/Seoul",
+  "area_name": "서울 강남구",
   "plan": "free",
   "guardians": [{ "guardian_id": "u_789", "relation": "딸", "linked_at": "2026-11-20T19:02:00+09:00" }],
   "sharing": {
@@ -273,22 +274,44 @@ curl http://127.0.0.1:8042/users/u_123
   "preferences": {
     "time_hints": { "morning": "08:00", "noon": "12:00", "evening": "18:00", "bedtime": "21:00" },
     "quiet_hours": { "start": "22:00", "end": "07:00" },
-    "report_send_time": "21:00"
+    "report_send_time": "21:00",
+    "tts_speed": 1.0
   },
   "updated_at": "2026-11-21T09:30:00+09:00"
 }
 ```
 
+- `area_name`: 날씨용 시·구 이름 (할 일 추천 #33). 행정동은 넣지 않음. 지역을 정하지 않았으면 `null`
+- `preferences.tts_speed`: TTS 속도 (숫자, 기본 `1.0`, DB `user_preferences.tts_speed`)
+- `preferences.quiet_hours`: 어르신은 **할 일 알림**을 보내지 않는 시간
+
+보호자 계정(`GET /users/u_789`)은 `sharing`이 `null`이고, `preferences`에는 **보호자 자신의** 방해 금지 시간만 있습니다. 하루 요약과 `medium` 알림을 아침까지 미루는 기준입니다 (어르신 `quiet_hours`와 다른 값).
+
+```json
+{
+  "user_id": "u_789",
+  "role": "guardian",
+  "display_name": null,
+  "timezone": "Asia/Seoul",
+  "area_name": null,
+  "plan": "free",
+  "guardians": [],
+  "sharing": null,
+  "preferences": { "quiet_hours": { "start": "22:00", "end": "07:00" } },
+  "updated_at": "2026-11-20T19:02:00+09:00"
+}
+```
+
 | 테스트용 `user_id` | 내용 |
 | --- | --- |
-| `u_123` | 명세 예시와 같음. 무료, 호칭 "김영자 님", 보호자 `u_789`(딸), 일정·기분 공유 |
-| `u_456` | `premium` (대화 무제한) |
-| `u_no_guardian` | 보호자 없음 (`guardians: []`) |
-| `u_789` | 보호자 계정 (`role: "guardian"`, `sharing`·`preferences`는 `null`) |
+| `u_123` | 명세 예시와 같음. 무료, 호칭 "김영자 님", 지역 "서울 강남구", 보호자 `u_789`(딸), 일정·기분 공유 |
+| `u_456` | `premium` (대화 무제한), 지역 "부산 해운대구" |
+| `u_no_guardian` | 보호자 없음 (`guardians: []`), 지역 없음 |
+| `u_789` | 보호자 계정 (`role: "guardian"`, `sharing`은 `null`, `preferences`는 보호자 방해 금지 시간) |
 | `u_unknown` | `404 USER_NOT_FOUND` |
-| 그 밖의 아무 `user_id` | 무료 어르신, 호칭 없음(`null`), 보호자 `u_789`, **공유 안 함** |
+| 그 밖의 아무 `user_id` | 무료 어르신, 호칭·지역 없음(`null`), 보호자 `u_789`, **공유 안 함** |
 
-실명·전화번호·생년·동네는 응답에 없습니다 (명세 7 "꼭 필요한 필드만").
+실명·전화번호·생년·동네(행정동)는 응답에 없습니다 (명세 7 "꼭 필요한 필드만"). 지역은 날씨용 시·구까지만 줍니다.
 
 ### 6. 대화 사용량
 
@@ -321,13 +344,14 @@ curl -X POST http://127.0.0.1:8042/usage/conversations -H "Content-Type: applica
 > **mock에서 임시로 정한 것** (#67에서 확정되면 맞춰 고칩니다)
 >
 > - 무료 한도 10회 (`--free-limit`로 바꿀 수 있음), 날짜 경계는 사용자 시간대 자정
-> - 모든 사용자의 시간대는 `Asia/Seoul`
+> - 모든 사용자의 시간대는 `Asia/Seoul`. Windows에 시간대 데이터(`tzdata`)가 없으면 고정 `+09:00`으로 대신 씀 (한국은 서머타임이 없어 결과가 같음)
+> - 보호자 방해 금지 시간 기본값 22:00~07:00, 어르신 `tts_speed` 기본값 `1.0`
 > - "대화 1회"의 기준은 A가 정해서 기록하는 것으로 봄. mock은 받은 기록을 셀 뿐
 > - 보호자 계정의 사용량도 같은 규칙으로 셈 (명세에 없음)
 
 ### 확인·테스트용 (mock 전용, 실제 서버에는 없음)
 
-- `PATCH /mock/users/{user_id}`: `plan`, `display_name`, `sharing`만 바꿈. 예) `{"plan": "premium"}`, `{"sharing": {"health": true}}`. 등급을 바꾸면 6번 한도에 바로 반영
+- `PATCH /mock/users/{user_id}`: `plan`, `display_name`, `area_name`, `sharing`만 바꿈. 예) `{"plan": "premium"}`, `{"sharing": {"health": true}}`, `{"area_name": null}`(지역 미설정 흐름 확인). 등급을 바꾸면 6번 한도에 바로 반영
 - `POST /mock/usage/{user_id}/reset`: 오늘 횟수 비우기 (어제 기록은 남김)
 - `X-Mock-Fail` / `X-Mock-Delay`: **GET에도 됩니다.** 6-1이 실패하거나 2초 넘게 걸릴 때 A가 대화를 허용하는지 확인할 때 씀
 
@@ -340,7 +364,7 @@ python -m unittest discover tools/mocks
 ## 구조
 
 공통 코드(오류 형식, 응답 보내기, 테스트용 헤더, CORS, 실행)는 [_common.py](_common.py)에 있습니다.
-새 mock은 `MockHandler`를 상속해 `route()`만 채우면 됩니다. 옵션이 더 필요하면 `run(..., add_arguments=...)`을 씁니다 (`user_mock.py`의 `--free-limit` 참고).
+새 mock은 `MockHandler`를 상속해 `route()`만 채우고 `run(Handler, 설명, 포트, 이름)`으로 띄웁니다. 옵션이 더 필요하면 `run(None, …, add_arguments=옵션을_붙이는_함수, handler_factory=lambda args: Handler)`처럼 옵션 값으로 Handler를 만드는 함수를 따로 줍니다 (`user_mock.py`의 `--free-limit` 참고).
 
 ## 개인정보
 
