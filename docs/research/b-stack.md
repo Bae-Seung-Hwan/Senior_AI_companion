@@ -21,8 +21,8 @@
 | **카카오 SDK** (MVP 이후 카톡 연동) | 카카오 공식 SDK 없음 (JS·Android·iOS·Flutter만 공식). MVP 초대는 OS 공유 창으로 링크를 보내면 충분 | 카카오 공식 Flutter SDK (`kakao_flutter_sdk`, 공유·톡 등 포함) |
 | 기기 내장 STT·TTS (voice-stack.md MVP 기준선) | 양쪽 다 라이브러리가 있고 말하기 속도 조절 가능 → 결정에 영향 없음 | 〃 |
 
-- **가장 큰 차이는 첫 줄**: B는 Windows에서 작업합니다. 팀에 Mac이 없으면 Mac 없이 iOS 시연 빌드를 만들 수 있는지가 일정에 가장 큰 영향을 줍니다 (회의에서 Mac 여부 확인)
-- **정하는 순서**: ① 두 사람의 TypeScript / Dart 경험 확인 → 한쪽이 확실하면 그쪽 ② 둘 다 없으면 Expo → 푸시는 Expo Push, 결제는 RevenueCat이 따라 정해짐
+- **가장 큰 차이는 첫 줄**: 팀 환경은 A Windows, B Mac·Windows. Flutter면 iOS 빌드·시험을 **B의 Mac 한 대에서만** 할 수 있어 B에게 몰리고, A는 자기 화면을 iPhone에서 직접 확인하기 어렵습니다. Expo면 A도 Windows에서 EAS Build로 iOS 빌드를 만들 수 있습니다. B의 Mac은 iOS 시뮬레이터 확인과 빌드 문제를 풀 때 씁니다
+- **정하는 순서**: ① 두 사람의 TypeScript / Dart 경험 확인 → 한쪽이 확실하면 그쪽 (Flutter라면 iOS 빌드 담당을 B로 정해 둠) ② 둘 다 없으면 Expo → 푸시는 Expo Push, 결제는 RevenueCat이 따라 정해짐
 - **어느 쪽이든 첫 주에 확인할 위험**: 앱이 꺼져 있을 때 정해진 시각에 복약 알림이 정확히 울리고 소리가 나는지(Android 정확한 알람 권한, iOS 제약), 긴급 채널 푸시가 방해 금지 중에도 오는지. 프레임워크와 상관없는 플랫폼 제약이라 development build로 먼저 시험
 - 푸시·결제는 Expo Go가 아니라 **development build**로 개발·시험합니다 (Expo 푸시 설정 안내와 RevenueCat Expo 안내가 development build 기준)
 
