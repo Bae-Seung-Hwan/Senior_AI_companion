@@ -1,7 +1,7 @@
 """할 일 등록 API mock (명세 1, #45)
 
 A가 B의 실제 서버를 기다리지 않고 "말로 할 일 등록" 흐름을 개발할 수 있게 하는 가짜 서버.
-docs/api-contracts.md 1번 (PR #37 초안) 형식을 따른다. 데이터는 메모리에만 저장하고, 끄면 사라진다.
+docs/api-contracts.md 1번 형식을 따른다. 데이터는 메모리에만 저장하고, 끄면 사라진다.
 표준 라이브러리만 사용하므로 설치할 것이 없다.
 
 사용법:
@@ -21,6 +21,7 @@ docs/api-contracts.md 1번 (PR #37 초안) 형식을 따른다. 데이터는 메
 
 import argparse
 import json
+import re
 import threading
 import time
 import uuid
@@ -42,9 +43,10 @@ UNKNOWN_USER_ID = "u_unknown"
 
 
 class ApiError(Exception):
-    def __init__(self, status, code, message):
+    def __init__(self, status, code, message, **extra):
         super().__init__(message)
         self.status, self.code, self.message = status, code, message
+        self.extra = extra  # 에러 본문에 더 넣을 필드 (예: existing_todo_id)
 
 
 def bad(code, message):
@@ -59,6 +61,9 @@ def parse_date(value, field):
 
 
 def parse_hhmm(value, field):
+    # int()는 "+5:30", " 5:30"도 받으므로 숫자 두 자리씩인지 먼저 거른다
+    if not isinstance(value, str) or not re.fullmatch(r"\d{2}:\d{2}", value, re.ASCII):
+        raise bad("INVALID_REQUEST", f"{field}는 HH:MM 형식이어야 합니다")
     try:
         hh, mm = value.split(":")
         h, m = int(hh), int(mm)
@@ -151,6 +156,12 @@ def next_at(the_date, hm, repeat, now):
     return None  # 도달하지 않음
 
 
+def duplicate_key(body):
+    """같은 사용자·날짜·시각·제목이면 중복 (409 DUPLICATE_TODO).
+    time이 없으면 time_hint를 비교한다 (명세에 없는 임시 규칙, README 참고)."""
+    return body["user_id"], body.get("date"), body.get("time"), body.get("time_hint"), body["title"].strip()
+
+
 class Store:
     """메모리 저장소. 같은 request_id는 처음 응답을 그대로 돌려준다."""
 
@@ -169,10 +180,15 @@ class Store:
 
             now = self.clock()
             the_date, hm, repeat = validate(body, now)
+            title = body["title"].strip()
+            for t in self.todos:
+                if duplicate_key(t["request"]) == duplicate_key(body):
+                    raise ApiError(409, "DUPLICATE_TODO", "같은 할 일이 이미 등록되어 있습니다",
+                                   existing_todo_id=t["todo_id"])
             at = next_at(the_date, hm, repeat, now)
             resp = {
                 "todo_id": f"t_{len(self.todos) + 1:03d}",
-                "title": body["title"].strip(),
+                "title": title,
                 "next_at": at.isoformat() if at else None,
                 "reminder": at is not None,
             }
@@ -197,7 +213,7 @@ def make_handler(store):
             self.wfile.write(data)
 
         def _error(self, err):
-            self._send(err.status, {"error": {"code": err.code, "message": err.message}})
+            self._send(err.status, {"error": {"code": err.code, "message": err.message, **err.extra}})
 
         def _mock_headers(self):
             try:

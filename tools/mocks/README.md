@@ -18,7 +18,7 @@ python tools/mocks/todo_mock.py
 
 ## 1. 할 일 등록 mock
 
-`POST /todos` — 명세 1번 (PR #37 초안) 형식
+`POST /todos` — 명세 1번 형식
 
 ```bash
 curl -X POST http://127.0.0.1:8045/todos -H "Content-Type: application/json" -d '{
@@ -45,17 +45,18 @@ curl -X POST http://127.0.0.1:8045/todos -H "Content-Type: application/json" -d 
 | --- | --- |
 | 정상 | `201` + `todo_id`, `title`, `next_at`, `reminder` |
 | 같은 `request_id`로 다시 보냄 | `200` + 처음 응답 그대로 (새로 만들지 않음) |
+| 같은 사용자·`date`·`time`·`title`이 이미 있음 (`request_id`는 다름) | `409 DUPLICATE_TODO` + `existing_todo_id` |
 | `time_hint`만 있음 | 기본 시각으로 계산: morning 08:00, noon 12:00, evening 18:00, bedtime 21:00 (회의에서 확정 전 임시값) |
 | `time`·`time_hint` 둘 다 있음 | `400 INVALID_REQUEST` (둘 중 하나만) |
 | `time`·`time_hint` 둘 다 없음 | `next_at: null`, `reminder: false` |
-| 반복 (`date: null`) | 오늘부터 시작해서 다음 알림 시각 |
+| 반복 (`date: null`) | 요청 받은 날(오늘)부터 시작해서 다음 알림 시각 |
 | 과거 날짜, 오늘인데 이미 지난 시각 | `400 INVALID_DATE` |
 | `title`이 비어 있음 | `400 MISSING_TITLE` |
 | 반복도 아니고 `date`도 없음 | `400 MISSING_SCHEDULE` |
 | `user_id`가 `u_unknown` | `404 USER_NOT_FOUND` |
 | 그 밖의 형식 오류 (UUID 아님, 없는 `kind`, `HH:MM` 아님 등) | `400 INVALID_REQUEST` |
 
-> "오늘인데 이미 지난 시각" → `INVALID_DATE`, `404` → `USER_NOT_FOUND`, `time`·`time_hint` 둘 다 → `400`은 #37 초안(0b778ee) 기준입니다. #37이 확정되면 다시 맞춥니다.
+> **중복 판단 임시 규칙** (명세에 없어서 mock이 정함): `time`이 null이면 `time_hint`가 같을 때 같은 시각으로 봅니다 (`time`·`time_hint` 둘 다 null끼리도 같음). 반복이라 `date`가 null이면 null끼리 같은 날짜로 봅니다. `title`은 앞뒤 공백을 빼고 비교합니다.
 
 ### 확인·테스트용 (mock 전용, 실제 서버에는 없음)
 

@@ -90,6 +90,35 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(self.error_code(repeat={"freq": "weekly"}), (400, "INVALID_REQUEST"))
         self.assertEqual(self.error_code(time_hint="morning"), (400, "INVALID_REQUEST"))  # time과 둘 다
 
+    def test_같은_할_일은_409(self):
+        _, first = self.create()
+        with self.assertRaises(ApiError) as ctx:
+            self.create(title=" 치과 예약 ")  # request_id만 다름
+        err = ctx.exception
+        self.assertEqual((err.status, err.code), (409, "DUPLICATE_TODO"))
+        self.assertEqual(err.extra, {"existing_todo_id": first["todo_id"]})
+        self.assertEqual(len(self.store.list()), 1)
+
+    def test_중복_판단은_사용자_날짜_시각_제목(self):
+        self.create()
+        for over in ({"user_id": "u_456"}, {"date": "2026-11-25"}, {"time": "16:00"},
+                     {"title": "안과 예약"}, {"time": None, "time_hint": "evening"}):
+            self.assertEqual(self.create(**over)[0], 201, over)
+
+    def test_time이_없으면_time_hint로_중복_판단(self):
+        self.create(time=None, time_hint="morning")
+        self.assertEqual(self.error_code(time=None, time_hint="morning"), (409, "DUPLICATE_TODO"))
+        self.assertEqual(self.create(time=None, time_hint="noon")[0], 201)
+
+    def test_중복이어도_같은_request_id면_200(self):
+        body = req()
+        _, first = self.store.create(body)
+        self.assertEqual(self.store.create(body), (200, first))
+
+    def test_잘못된_시각_형식(self):
+        for value in ("+5:30", " 5:30", "5:30", "05:3", "١٢:٣٠", "24:00", 1530):
+            self.assertEqual(self.error_code(time=value), (400, "INVALID_REQUEST"), value)
+
     def test_오류는_저장하지_않음(self):
         body = req(title="")
         with self.assertRaises(ApiError):
@@ -131,13 +160,21 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(resp["error"]["code"], "INVALID_DATE")
         self.assertIn("message", resp["error"])
 
+    def test_중복_오류_본문(self):
+        _, first = self.call("POST", "/todos", req(user_id="u_dup"))
+        status, resp = self.call("POST", "/todos", req(user_id="u_dup"))
+        self.assertEqual(status, 409)
+        self.assertEqual(resp["error"]["code"], "DUPLICATE_TODO")
+        self.assertEqual(resp["error"]["existing_todo_id"], first["todo_id"])
+        self.assertIn("message", resp["error"])
+
     def test_가짜_장애_헤더(self):
         status, resp = self.call("POST", "/todos", req(), headers={"X-Mock-Fail": "503"})
         self.assertEqual((status, resp["error"]["code"]), (503, "MOCK_FAILURE"))
 
     def test_잘못된_지연_헤더는_무시(self):
         for value in ("abc", "-1"):
-            status, _ = self.call("POST", "/todos", req(), headers={"X-Mock-Delay": value})
+            status, _ = self.call("POST", "/todos", req(title=f"지연 {value}"), headers={"X-Mock-Delay": value})
             self.assertEqual(status, 201)
 
     def test_JSON_아님(self):
