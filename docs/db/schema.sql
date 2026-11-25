@@ -27,7 +27,7 @@ CREATE TABLE users (
     name          text        NOT NULL,                 -- 실명
     display_name  text,                                 -- AI가 부르는 호칭 (예: "김영자 님")
     birth_year    smallint    CHECK (birth_year BETWEEN 1900 AND 2100),
-    phone         text,                                 -- E.164 (+8210...). 알림톡 발송에 사용
+    phone         text,                                 -- E.164 (+8210...). 알림톡 발송에 사용 (MVP 이후. MVP는 앱 푸시만)
     region_code   text        REFERENCES regions(code), -- 동네(행정동). null이면 아직 안 정함 → 명세 5 empty_reason "no_region"
     timezone      text        NOT NULL DEFAULT 'Asia/Seoul',
     created_at    timestamptz NOT NULL DEFAULT now(),
@@ -107,20 +107,23 @@ SELECT DISTINCT ON (user_id, consent_type)
 FROM consent_events
 ORDER BY user_id, consent_type, created_at DESC, id DESC;
 
--- 어르신 개인 설정 (#43 보호자 원격 설정, 명세 1 time_hint)
+-- 개인 설정 (#43 보호자 원격 설정, 명세 1 time_hint, 명세 7 preferences). 어르신·보호자 모두 각자 한 줄
+-- 방해 금지 시간은 "받는 사람" 자신의 값을 쓴다 (README 13):
+--   어르신 행 → 어르신이 받는 할 일 알림 / 보호자 행 → 보호자가 받는 하루 요약·medium 긴급 알림 (high는 무시하고 보냄)
 CREATE TABLE user_preferences (
     user_id         bigint   PRIMARY KEY REFERENCES users(id),
-    morning_time    time     NOT NULL DEFAULT '08:00',
+    morning_time    time     NOT NULL DEFAULT '08:00',  -- time_hint 기본 시각 4개는 어르신 행에만 의미
     noon_time       time     NOT NULL DEFAULT '12:00',
     evening_time    time     NOT NULL DEFAULT '18:00',
     bedtime_time    time     NOT NULL DEFAULT '21:00',
-    quiet_start     time     DEFAULT '22:00',          -- 방해 금지 시간 (긴급 high는 예외, 회의 확정 전)
-    quiet_end       time     DEFAULT '07:00',
-    report_send_time time    NOT NULL DEFAULT '21:00',  -- 보호자 요약 발송 시각 (#52)
+    quiet_start     time     DEFAULT '22:00',          -- 방해 금지 시간. 명세 7 preferences.quiet_hours {start, end}. 자정을 넘을 수 있음
+    quiet_end       time     DEFAULT '07:00',          -- 둘 다 null이면 방해 금지 없음 (quiet_hours: null). 기본값은 회의 확정 전
+    report_send_time time    NOT NULL DEFAULT '21:00',  -- 보호자 요약 발송 시각 (#52). 어르신 행에만 의미
     font_scale      numeric(3,2) NOT NULL DEFAULT 1.30,
     tts_speed       numeric(3,2) NOT NULL DEFAULT 0.90,
     updated_at      timestamptz NOT NULL DEFAULT now(),
-    updated_by      bigint   REFERENCES users(id)
+    updated_by      bigint   REFERENCES users(id),     -- 보호자가 어르신 설정을 원격으로 바꾸면 보호자 id
+    CHECK ((quiet_start IS NULL) = (quiet_end IS NULL))
 );
 
 -- 푸시 토큰 (#50)
@@ -142,7 +145,7 @@ CREATE TABLE todos (
     user_id       bigint      NOT NULL REFERENCES users(id),
     kind          text        NOT NULL CHECK (kind IN ('appointment', 'medication', 'task')),
     title         text        NOT NULL CHECK (length(btrim(title)) > 0),
-    date          date,                                 -- 한 번: 그날 / 반복: 시작일 (null이면 등록일)
+    date          date        NOT NULL,                 -- 한 번: 그날 / 반복: 시작일. 요청에 date가 없으면(반복) B가 받은 날(사용자 시간대)로 채움 (명세 1)
     time          time,                                 -- 정확한 시각
     time_hint     text        CHECK (time_hint IN ('morning', 'noon', 'evening', 'bedtime')),
     repeat_freq   text        CHECK (repeat_freq IN ('daily', 'weekly')),
@@ -157,11 +160,15 @@ CREATE TABLE todos (
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now(),
     deleted_at    timestamptz,
-    CHECK (date IS NOT NULL OR repeat_freq IS NOT NULL),              -- MISSING_SCHEDULE
+    -- MISSING_SCHEDULE(반복도 date도 없음)은 B가 date를 채우기 전에 API에서 검사한다 (DB에는 date가 항상 있음)
     CHECK (repeat_freq IS DISTINCT FROM 'weekly' OR coalesce(cardinality(repeat_weekdays), 0) > 0),
     CHECK (time IS NULL OR time_hint IS NULL)                          -- 둘 중 하나만
 );
-CREATE INDEX todos_user_active ON todos (user_id, date) WHERE deleted_at IS NULL;
+-- 409 DUPLICATE_TODO (명세 1): 같은 사용자·날짜·시각·제목이면 하나만. 지운 할 일은 제외
+-- time이 null(time_hint만)이어도 같은 값으로 보려고 NULLS NOT DISTINCT (PG 15+). time_hint도 키에 넣어 "아침 혈압약"과 "저녁 혈압약"은 다른 할 일
+-- 반복 할 일은 date = 시작일이라 같은 날 같은 반복을 두 번 등록하면 막히고, 다른 날 다시 등록한 것은 막지 않음 (README 12)
+-- 할 일 목록 조회(user_id, date)도 이 인덱스를 씀
+CREATE UNIQUE INDEX todos_no_dup ON todos (user_id, date, time, time_hint, title) NULLS NOT DISTINCT WHERE deleted_at IS NULL;
 
 -- 완료 기록. 반복 할 일은 날짜(회차)마다 한 줄. "약 먹었어" → 여기에 기록
 CREATE TABLE todo_completions (
@@ -225,7 +232,7 @@ CREATE TABLE alerts (
     severity           text        NOT NULL CHECK (severity IN ('high', 'medium')),   -- 실제 적용 값
     requested_severity text        NOT NULL CHECK (requested_severity IN ('high', 'medium')),  -- A가 보낸 값
     reason             text        NOT NULL,
-    evidence_text      text        NOT NULL,            -- [민감] 알림톡에 넣지 않고 보호자 앱에서만 표시
+    evidence_text      text        NOT NULL,            -- [민감] 푸시 내용에 넣지 않고 보호자 앱 알림 상세에서만 표시
     conversation_id    text,
     message_id         text,
     user_response      text        NOT NULL DEFAULT 'pending' CHECK (user_response IN (
@@ -241,22 +248,45 @@ CREATE TABLE alerts (
 );
 CREATE INDEX alerts_user_recent ON alerts (user_id, type, detected_at DESC);  -- 10분 내 합치기 판단용
 
--- 발송 기록. 요약·긴급 알림·초대·할 일 알림을 누구에게, 어떤 채널로 보냈는지. 쌓기만 한다
+-- 발송 기록. 요약·긴급 알림·초대·할 일 알림을 누구에게, 어떤 채널로 보냈는지. 줄을 지우지 않는다 (상태만 바뀜)
+-- 보호자에게 보낸 줄은 명세 3·4 응답의 deliveries 한 줄과 같다 (명세 공통 규칙 "보호자 발송 기록", README 11)
 CREATE TABLE notification_deliveries (
     id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    recipient_id        bigint      NOT NULL REFERENCES users(id),
-    channel             text        NOT NULL CHECK (channel IN ('push', 'alimtalk', 'sms')),
+    recipient_id        bigint      NOT NULL REFERENCES users(id),   -- 명세 guardian_id (보호자에게 보낸 줄)
+    channel             text        NOT NULL CHECK (channel IN ('push', 'alimtalk', 'sms')),  -- MVP는 push만. alimtalk·sms는 MVP 이후
     subject_type        text        NOT NULL CHECK (subject_type IN ('daily_report', 'weekly_report', 'alert', 'invite', 'reminder')),
     subject_id          bigint      NOT NULL,           -- subject_type에 따라 daily_reports / alerts / guardian_invites / reminders의 id (FK 없음, README 참고)
-    status              text        NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'failed', 'canceled')),  -- canceled: 긴급 알림 severity를 낮춰 아직 안 보낸 알림톡 취소
-    fallback_of         bigint      REFERENCES notification_deliveries(id),  -- 푸시 실패 → 알림톡 대체 발송
+    kind                text        CHECK (kind IN (
+                            'report',              -- 하루 요약 (명세 3)
+                            'alert',               -- 긴급 알림. 처음 발송과 severity를 올려 다시 보낸 긴급 푸시 (명세 4)
+                            're_alert',            -- alert를 안 열어 봤을 때 5분 뒤 재알림 (high만)
+                            'follow_up')),         -- 어르신 선택을 알리는 후속 푸시 (예: dismissed)
+    priority            text        NOT NULL DEFAULT 'normal' CHECK (priority IN ('urgent', 'normal')),  -- urgent: 긴급 알림 채널, 방해 금지 무시
+    status              text        NOT NULL DEFAULT 'queued' CHECK (status IN (
+                            'queued',              -- 보낼 차례를 기다림 (방해 금지라 아침까지 미룸, 아직 때가 안 된 re_alert 포함)
+                            'scheduled',           -- 나중에 묶어서 보냄 (무료 등급 하루 요약 주 1회). scheduled_at 필수
+                            'sent', 'failed',
+                            'canceled')),          -- 아직 안 보낸 재알림 취소 (보호자가 이미 열어 봄 / severity를 낮춤). 보낸 것은 취소하지 않음
+    scheduled_at        timestamptz,                    -- 보낼 예정 시각. scheduled와 대기 중인 re_alert에 필수. 보낸 뒤·취소 뒤에도 값은 남김
+    opened_at           timestamptz,                    -- 받은 사람이 푸시를 열어 본 시각. alert를 열어 봤으면 re_alert를 canceled로
+    fallback_of         bigint      REFERENCES notification_deliveries(id),  -- (MVP 이후) 푸시 실패 → 알림톡 대체 발송
     provider_message_id text,
     error_code          text,
     created_at          timestamptz NOT NULL DEFAULT now(),
-    sent_at             timestamptz
+    sent_at             timestamptz,
+    -- 보호자에게 가는 요약·긴급 알림은 kind 필수, 초대·할 일 알림(invite, reminder)은 kind 없음
+    CHECK ((kind IS NOT NULL) = (subject_type IN ('daily_report', 'weekly_report', 'alert'))),
+    CHECK (kind IS NULL OR (kind = 'report') = (subject_type IN ('daily_report', 'weekly_report'))),
+    CHECK (priority = 'normal' OR coalesce(kind IN ('alert', 're_alert'), false)),  -- 요약·후속 푸시·초대·할 일 알림은 항상 normal
+    -- scheduled_at: 주 1회 묶음(scheduled)은 하루 요약에만 쓰고 예정 시각 필수. 재알림은 대기·보냄·취소 모두 예정 시각이 있음
+    CHECK (status <> 'scheduled' OR (kind IS NOT DISTINCT FROM 'report' AND scheduled_at IS NOT NULL)),
+    CHECK (kind IS DISTINCT FROM 're_alert' OR scheduled_at IS NOT NULL),
+    CHECK (opened_at IS NULL OR status = 'sent')                     -- 보낸 것만 열어 볼 수 있음
 );
-CREATE INDEX notification_deliveries_subject ON notification_deliveries (subject_type, subject_id);
+CREATE INDEX notification_deliveries_subject ON notification_deliveries (subject_type, subject_id, recipient_id);
 CREATE INDEX notification_deliveries_queue ON notification_deliveries (created_at) WHERE status = 'queued';
+-- 스케줄러가 scheduled_at <= now() 인 주 1회 요약·재알림을 꺼냄
+CREATE INDEX notification_deliveries_due ON notification_deliveries (scheduled_at) WHERE status IN ('queued', 'scheduled') AND scheduled_at IS NOT NULL;
 
 -- ─────────────────────────────────────────────
 -- 4. 지역·취미 만남 (#14, 명세 2·5)
