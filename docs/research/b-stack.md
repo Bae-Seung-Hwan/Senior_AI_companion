@@ -14,7 +14,7 @@
 | 기준 | 왜 중요한가 |
 | --- | --- |
 | 긴급 알림이 빨리, 확실히 도착 | 사기·응급 알림(명세 4)은 몇 초 안에 보호자에게 가야 함 |
-| 보호자가 앱을 안 깔아도 받음 | 자녀가 앱을 설치하기 전에도 카톡으로 요약·긴급 알림을 받아야 이탈이 적음 |
+| 보호자가 앱을 안 깔아도 받음 **(MVP 이후, 알림톡)** | 자녀가 앱을 설치하기 전에도 카톡으로 요약·긴급 알림을 받아야 이탈이 적음. MVP는 앱 푸시만이라 지킬 수 없음 → 6장 안건 "앱 설치를 어떻게 이끌지"에서 다룸 |
 | 민감정보를 외부로 덜 보냄 | 알림톡 본문은 카카오·대행사를 거침 → 건강·대화 내용은 넣지 않음 (#37 리뷰) |
 | 시연 일정 | 알림톡은 채널 개설·템플릿 검수에 영업일이 걸림 → 미리 신청해야 함 |
 | 2인 팀이 운영 가능 | 직접 만들 것과 맡길 것을 나눔 |
@@ -30,6 +30,22 @@
 
 - 세 무료 서비스 모두 **페이로드가 약 4KB로 제한**됩니다. 알림에는 짧은 문장과 ID만 넣고, 내용은 앱에서 서버로 다시 조회합니다
 - 예약 발송(복약 알림 #47)은 푸시 서비스가 해주지 않습니다. **서버의 예약 작업이나 기기 로컬 알림**으로 해야 하므로, 서버 스택을 고를 때 예약 작업(스케줄러) 지원을 같이 봅니다
+- **5분 뒤 재알림(`high`)과 방해 금지 시간 미루기(`medium`)도 푸시 서비스가 해 주지 않습니다** (명세 #37). 서버가 "보호자가 열어 봄" 기록을 보고 5분 뒤 다시 보내고, 방해 금지 시간에 생긴 `medium`은 아침 시각에 보내도록 예약해야 합니다. 그래서 **서버 스케줄러가 꼭 필요**하고, 서버 스택을 고를 때 같이 봅니다
+
+### `high` / `medium` 구분 지원 (명세 #37)
+
+명세 #37에서 `high`는 긴급 채널 푸시(소리 + 화면 켜짐, 방해 금지 무시), `medium`은 일반 푸시로 나눴습니다. 후보별로 이게 되는지 공식 문서에서 확인한 결과입니다 (2026-11-25).
+
+| 항목 | 플랫폼 (Android / iOS) | FCM (HTTP v1) | Expo Push |
+| --- | --- | --- | --- |
+| Android 알림 채널 | 앱이 채널을 만들 때 중요도를 정함. `IMPORTANCE_HIGH`는 소리 + 헤드업 표시. **만든 뒤에는 앱이 중요도를 못 바꾸고** 사용자만 바꿀 수 있음 | `android.notification.channel_id` 지원. 앱이 그 채널을 먼저 만들어 둬야 함 (없으면 매니페스트에 지정한 기본 채널로 감) | `channelId` 지원. **기기에 그 채널이 없으면 알림이 표시되지 않음**. 채널은 `expo-notifications`의 `setNotificationChannelAsync`(중요도 `HIGH`/`MAX` 등)로 만듦 |
+| Android 방해 금지 무시 | `NotificationChannel.setBypassDnd`: 앱이 방해 금지 정책 접근 권한이 있고, 사용자가 채널 설정을 바꾸기 전일 때만 앱이 설정 가능. 사실상 **사용자 허용이 필요** | 채널 설정을 따름 (메시지 필드 없음) | 채널 옵션에 `bypassDnd`가 있음. 제약에 대한 설명은 Expo 문서에 없음 |
+| iOS time-sensitive | 페이로드 `aps`의 `interruption-level`에 `time-sensitive` (값: `passive`/`active`/`time-sensitive`/`critical`). 앱에 Time Sensitive Notifications capability(entitlement)도 켜야 함 — **Apple entitlement 문서 페이지는 이번에 열리지 않아 공식 확인 못 함** | `apns.payload`에 `aps` 사전을 그대로 넣는 방식이라 `interruption-level`도 넣을 수 있을 것으로 보임. **FCM 문서에 `interruption-level`을 직접 언급한 곳은 확인 못 함** | `interruptionLevel` 필드 지원 (`active`/`critical`/`passive`/`time-sensitive`). entitlement 설정 방법은 Expo 푸시 문서에 없음 → app config의 `ios.entitlements`로 직접 넣어야 할 것으로 보임 (확인 못 함) |
+| 잠든 기기에 바로 도착 | | `android.priority` `HIGH`. APNs `apns-priority`는 지정 안 하면 10 | `priority` `high`. Android 기본값은 `normal`이라 잠든 기기에서 늦을 수 있음 → `high` 알림은 꼭 `high`로 |
+
+- **정리**: FCM·Expo Push 모두 채널 ID와 iOS interruption level을 지정할 수 있어서, 이 기준으로는 둘 중 무엇을 골라도 됩니다
+- 대신 앱이 할 일이 생깁니다: 앱을 처음 켤 때 **채널 두 개(긴급 / 일반)를 만들고**, iOS는 time-sensitive capability를 켭니다. Android 채널 중요도는 나중에 못 바꾸므로 채널 ID와 중요도를 처음에 정해 둡니다
+- 방해 금지를 완전히 무시하는 것은 두 플랫폼 모두 사용자 허용(Android 방해 금지 접근) 또는 별도 권한(iOS `critical`은 별도 entitlement 필요)이 걸립니다. 첫 실행 때 보호자에게 허용을 안내하는 화면이 필요한지 앱 설계 때 정합니다
 
 **잠정 추천**: Expo를 쓰면 Expo Push, 아니면 FCM
 
@@ -118,7 +134,7 @@ B 영역 데이터는 서로 **관계가 많고 이력이 중요합니다.**
 - [x] ~~알림톡 채널 명의, 이번 주 검수 신청 여부~~ → MVP는 앱 푸시만, 알림톡은 MVP 이후 (2026-11-24)
 - [x] ~~보호자 초대 방식~~ → MVP는 카톡 공유 (2026-11-24)
 - [ ] 앱 프레임워크 먼저 결정 → 푸시(Expo Push / FCM)와 결제 연동 방식이 따라 정해짐
-- [ ] 보호자가 앱을 깔기 전에는 요약·긴급 알림을 못 받음 → 가입·초대 흐름에서 앱 설치를 어떻게 이끌지
+- [ ] 보호자가 앱을 깔기 전에는 요약·긴급 알림을 못 받음 (1장 기준 "앱을 안 깔아도 받음"은 MVP 이후) → 가입·초대 흐름에서 앱 설치를 어떻게 이끌지
 - [ ] 인앱결제: RevenueCat으로 시작할지
 - [ ] DB: PostgreSQL + 관리형 서비스, 국내 리전
 
@@ -140,4 +156,11 @@ B 영역 데이터는 서로 **관계가 많고 이력이 중요합니다.**
 - [채널톡 알림톡 도움말](https://docs.channel.io/help/ko/articles/9747de9a)
 - [Firebase 요금](https://firebase.google.com/pricing)
 - [Courier: Expo vs Firebase FCM](https://www.courier.com/integrations/compare/expo-vs-firebase-fcm)
+- [Expo: Send notifications with the Expo Push Service, Message request format](https://docs.expo.dev/push-notifications/sending-notifications/#message-request-format) (`channelId`, `interruptionLevel`, `priority`)
+- [Expo: Notifications SDK](https://docs.expo.dev/versions/latest/sdk/notifications/) (`setNotificationChannelAsync`, `AndroidImportance`, `bypassDnd`)
+- [Expo: app config `ios.entitlements`](https://docs.expo.dev/versions/latest/config/app/)
+- [FCM HTTP v1 projects.messages](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages) (`AndroidNotification.channel_id`, `AndroidConfig.priority`, `ApnsConfig.payload`)
+- [Apple: Generating a remote notification](https://developer.apple.com/documentation/usernotifications/generating-a-remote-notification) (`aps`의 `interruption-level`)
+- [Android: 알림 채널 만들기 및 관리](https://developer.android.com/develop/ui/views/notifications/channels)
+- [Android: NotificationChannel.setBypassDnd](https://developer.android.com/reference/android/app/NotificationChannel#setBypassDnd(boolean))
 - [RevenueCat 요금](https://revenuecat.com/pricing)
