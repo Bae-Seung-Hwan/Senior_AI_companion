@@ -9,6 +9,23 @@
 
 푸시와 인앱결제는 **앱을 무엇으로 만드는지에 따라** 선택지가 달라집니다. 그래서 회의에서는 앱 프레임워크(React Native+Expo / Flutter / 네이티브)를 먼저 정하고, 아래 표에서 고르는 순서를 권합니다.
 
+**잠정 추천 (B, 2026-11-25)**: **React Native + Expo**. 단, 팀에 Flutter(Dart) 경험자가 있으면 Flutter도 괜찮습니다. 네이티브(Swift + Kotlin)는 2인 팀이 앱을 두 번 만드는 셈이라 제외합니다.
+
+| 우리 조건 | React Native + Expo | Flutter |
+| --- | --- | --- |
+| **Windows에서 iOS 빌드** (시연·베타) | EAS Build가 Expo의 macOS 클라우드에서 iOS 빌드. Windows·Linux에서도 iOS 빌드 가능 (기기 설치용은 유료 Apple Developer 계정 필요) | iOS 빌드·배포에는 macOS의 Xcode가 필요 → Mac 또는 외부 CI 서비스 |
+| **긴급 / 일반 푸시 구분** (명세 4 `high`/`medium`) | `expo-notifications`로 Android 채널 생성, Expo Push가 `channelId`·`interruptionLevel` 지원 (2장 표) | FCM으로 같은 구분 가능 (2장 표) |
+| **서버에서 푸시 보내기** | Expo Push: HTTP 요청 한 번 | FCM HTTP v1: 서비스 계정 인증 필요 |
+| **인앱결제 검증** (4장 RevenueCat) | 공식 SDK `react-native-purchases`. Expo에서는 development build에서 실제 결제, Expo Go는 미리보기용 mock만 | 공식 SDK `purchases_flutter` |
+| **스토어 심사 없이 고치기** | EAS Update로 JS·스타일·이미지 변경을 바로 배포 (네이티브 코드 변경은 새 빌드). 어르신 베타 중 문구·버튼을 자주 고칠 때 유리 | 공식 기능 없음 (외부 서비스) |
+| **카카오 SDK** (MVP 이후 카톡 연동) | 카카오 공식 SDK 없음 (JS·Android·iOS·Flutter만 공식). MVP 초대는 OS 공유 창으로 링크를 보내면 충분 | 카카오 공식 Flutter SDK (`kakao_flutter_sdk`, 공유·톡 등 포함) |
+| 기기 내장 STT·TTS (voice-stack.md MVP 기준선) | 양쪽 다 라이브러리가 있고 말하기 속도 조절 가능 → 결정에 영향 없음 | 〃 |
+
+- **가장 큰 차이는 첫 줄**: B는 Windows에서 작업합니다. 팀에 Mac이 없으면 Mac 없이 iOS 시연 빌드를 만들 수 있는지가 일정에 가장 큰 영향을 줍니다 (회의에서 Mac 여부 확인)
+- **정하는 순서**: ① 두 사람의 TypeScript / Dart 경험 확인 → 한쪽이 확실하면 그쪽 ② 둘 다 없으면 Expo → 푸시는 Expo Push, 결제는 RevenueCat이 따라 정해짐
+- **어느 쪽이든 첫 주에 확인할 위험**: 앱이 꺼져 있을 때 정해진 시각에 복약 알림이 정확히 울리고 소리가 나는지(Android 정확한 알람 권한, iOS 제약), 긴급 채널 푸시가 방해 금지 중에도 오는지. 프레임워크와 상관없는 플랫폼 제약이라 development build로 먼저 시험
+- 푸시·결제는 Expo Go가 아니라 **development build**로 개발·시험합니다 (Expo 푸시 설정 안내와 RevenueCat Expo 안내가 development build 기준)
+
 ## 1. 우리 서비스에서 중요한 기준
 
 | 기준 | 왜 중요한가 |
@@ -133,13 +150,14 @@ B 영역 데이터는 서로 **관계가 많고 이력이 중요합니다.**
 
 - [x] ~~알림톡 채널 명의, 이번 주 검수 신청 여부~~ → MVP는 앱 푸시만, 알림톡은 MVP 이후 (2026-11-24)
 - [x] ~~보호자 초대 방식~~ → MVP는 카톡 공유 (2026-11-24)
-- [ ] 앱 프레임워크 먼저 결정 → 푸시(Expo Push / FCM)와 결제 연동 방식이 따라 정해짐
+- [ ] 앱 프레임워크 먼저 결정 → 푸시(Expo Push / FCM)와 결제 연동 방식이 따라 정해짐. B 잠정 추천: React Native + Expo (0장)
 - [ ] 보호자가 앱을 깔기 전에는 요약·긴급 알림을 못 받음 (1장 기준 "앱을 안 깔아도 받음"은 MVP 이후) → 가입·초대 흐름에서 앱 설치를 어떻게 이끌지
 - [ ] 인앱결제: RevenueCat으로 시작할지
 - [ ] DB: PostgreSQL + 관리형 서비스, 국내 리전
 
 ## 7. 결론 (회의 후 작성)
 
+- 앱 프레임워크:
 - 앱 푸시:
 - 알림톡 대행사: MVP에서는 쓰지 않음 (2026-11-24)
 - 인앱결제 검증:
@@ -164,3 +182,10 @@ B 영역 데이터는 서로 **관계가 많고 이력이 중요합니다.**
 - [Android: 알림 채널 만들기 및 관리](https://developer.android.com/develop/ui/views/notifications/channels)
 - [Android: NotificationChannel.setBypassDnd](https://developer.android.com/reference/android/app/NotificationChannel#setBypassDnd(boolean))
 - [RevenueCat 요금](https://revenuecat.com/pricing)
+- [Expo: EAS Build](https://docs.expo.dev/build/introduction/) (iOS·Android 클라우드 빌드, macOS 러너)
+- [Expo: Development builds](https://docs.expo.dev/develop/development-builds/introduction/) (Windows·Linux에서 iOS 빌드 가능 표)
+- [Expo: EAS Update](https://docs.expo.dev/eas-update/introduction/) (스토어 제출 사이 JS·에셋 업데이트)
+- [Expo: Push notifications setup](https://docs.expo.dev/push-notifications/push-notifications-setup/)
+- [Flutter: Build and release an iOS app](https://docs.flutter.dev/deployment/ios) (Xcode, macOS)
+- [RevenueCat: React Native 설치](https://www.revenuecat.com/docs/getting-started/installation/reactnative), [Expo 설치](https://www.revenuecat.com/docs/getting-started/installation/expo), [Flutter 설치](https://www.revenuecat.com/docs/getting-started/installation/flutter)
+- [Kakao Developers: Flutter SDK 시작하기](https://developers.kakao.com/docs/ko/flutter/getting-started) (공식 SDK: JavaScript·Android·iOS·Flutter)
