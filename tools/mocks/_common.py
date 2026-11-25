@@ -22,9 +22,10 @@ MAX_MOCK_DELAY = 30  # X-Mock-Delay 최대 초
 class ApiError(Exception):
     """명세 공통 에러 응답: {"error": {"code": …, "message": …}}"""
 
-    def __init__(self, status, code, message):
+    def __init__(self, status, code, message, **extra):
         super().__init__(message)
         self.status, self.code, self.message = status, code, message
+        self.extra = extra  # 에러 본문에 더 넣을 필드 (예: existing_todo_id)
 
 
 def invalid(message):
@@ -89,7 +90,7 @@ class MockHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _error(self, err):
-        self._send(err.status, {"error": {"code": err.code, "message": err.message}})
+        self._send(err.status, {"error": {"code": err.code, "message": err.message, **getattr(err, "extra", {})}})
 
     # --- 테스트용 헤더 (mock 전용, 명세에는 없음) ---
 
@@ -151,15 +152,22 @@ class MockHandler(BaseHTTPRequestHandler):
         print(f"[{self.log_name}] {self.command} {self.path} → {args[1] if len(args) > 1 else ''}")
 
 
-def run(handler, description, default_port, label, add_arguments=None):
-    """mock 서버 실행. add_arguments가 있으면 옵션을 더 받고, handler는 args를 받아 Handler를 만드는 함수다."""
+def run(handler, description, default_port, label, *, add_arguments=None, handler_factory=None):
+    """mock 서버 실행.
+
+    handler: Handler 클래스. 옵션이 필요 없는 mock은 이것만 준다.
+    add_arguments(ap): --host·--port 말고 옵션을 더 붙이는 함수 (선택)
+    handler_factory(args): 옵션 값으로 Handler 클래스를 만드는 함수. 이걸 쓰면 handler는 None으로 준다.
+    """
+    if (handler is None) == (handler_factory is None):
+        raise TypeError("handler(클래스)와 handler_factory(args → 클래스) 중 하나만 주세요")
     ap = argparse.ArgumentParser(description=description)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=default_port)
     if add_arguments:
         add_arguments(ap)
     args = ap.parse_args()
-    handler_cls = handler(args) if add_arguments else handler
+    handler_cls = handler_factory(args) if handler_factory else handler
     server = ThreadingHTTPServer((args.host, args.port), handler_cls)
     print(f"{label} 실행 중: http://{args.host}:{args.port}  (끄려면 Ctrl+C)")
     try:

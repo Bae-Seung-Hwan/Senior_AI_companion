@@ -13,12 +13,18 @@ from http.server import ThreadingHTTPServer
 
 from alert_mock import KST, ApiError, Store, make_handler
 
-NOW = datetime(2026, 11, 22, 14, 5, 20, tzinfo=KST)
+NOW = datetime(2026, 11, 22, 14, 5, 12, tzinfo=KST)  # 명세 4-1 예시와 같은 시각
 EVIDENCE = "아들이 휴대폰이 고장 났다고 문자로 급하게 300만원만 보내달래요."
 
-PUSH = {"guardian_id": "u_789", "channel": "push", "status": "sent"}
-ALIMTALK = {"guardian_id": "u_789", "channel": "alimtalk", "status": "queued"}
-CANCELED = {**ALIMTALK, "status": "canceled"}
+# 명세 공통 규칙 "보호자 발송 기록 (deliveries)" 형식
+_PUSH = {"guardian_id": "u_789", "channel": "push", "status": "sent", "scheduled_at": None}
+URGENT = {**_PUSH, "kind": "alert", "priority": "urgent"}  # high: 긴급 채널
+NORMAL = {**_PUSH, "kind": "alert", "priority": "normal"}  # medium: 일반 알림
+RE_ALERT = {**_PUSH, "kind": "re_alert", "priority": "urgent", "status": "queued",
+            "scheduled_at": "2026-11-22T14:10:12+09:00"}  # NOW + 5분
+RE_ALERT_CANCELED = {**RE_ALERT, "status": "canceled"}
+FOLLOW_UP = {**_PUSH, "kind": "follow_up", "priority": "normal"}
+DELIVERY_KEYS = {"guardian_id", "channel", "kind", "priority", "status", "scheduled_at"}
 
 
 def req(**over):
@@ -66,39 +72,61 @@ class StoreTest(unittest.TestCase):
             self.respond(alert_id, user_response, **over)
         return ctx.exception.status, ctx.exception.code
 
-    def test_high는_푸시와_알림톡(self):
+    def test_high는_긴급_푸시와_재알림(self):
         status, resp = self.create()
         self.assertEqual(status, 202)
-        self.assertEqual(resp, {"alert_id": "al_001", "severity": "high", "deliveries": [PUSH, ALIMTALK]})
+        # 명세 4-1 응답 예시와 같음
+        self.assertEqual(resp, {"alert_id": "al_001", "severity": "high", "deliveries": [URGENT, RE_ALERT]})
 
-    def test_medium은_푸시만(self):
+    def test_medium은_일반_푸시만(self):
         _, resp = self.create(type="emergency", severity="medium")
-        self.assertEqual((resp["severity"], resp["deliveries"]), ("medium", [PUSH]))
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("medium", [NORMAL]))
+
+    def test_deliveries는_공통_형식(self):
+        _, a = self.create(type="fraud", severity="high")
+        self.respond(a["alert_id"], "dismissed")
+        _, b = self.create(type="emergency", severity="medium")
+        self.respond(b["alert_id"], "no_response")
+        self.create(user_id="u_push_fail")
+        rows = [d for alert in self.store.list() for d in alert["deliveries"]]
+        self.assertTrue(rows)
+        for d in rows:
+            with self.subTest(d=d):
+                self.assertEqual(set(d), DELIVERY_KEYS)
+                self.assertEqual(d["channel"], "push")  # MVP는 앱 푸시만 (알림톡 없음)
+                self.assertIn(d["kind"], {"alert", "re_alert", "follow_up"})
+                self.assertIn(d["priority"], {"urgent", "normal"})
+                self.assertIn(d["status"], {"queued", "sent", "failed", "scheduled", "canceled"})
+                # scheduled_at은 scheduled와 아직 안 보낸 re_alert에만
+                has_time = d["status"] == "scheduled" or (d["kind"] == "re_alert" and d["status"] != "sent")
+                self.assertEqual(d["scheduled_at"] is not None, has_time)
+                if d["status"] == "canceled":
+                    self.assertEqual(d["kind"], "re_alert")
 
     # --- 4-2 PATCH와 severity 규칙 ---
 
-    def test_사기_dismissed면_medium으로_낮추고_알림톡_취소(self):
+    def test_사기_dismissed면_medium으로_낮추고_재알림_취소(self):
         _, first = self.create(type="fraud", severity="high")
         status, resp = self.respond(first["alert_id"], "dismissed")
         self.assertEqual(status, 200)
-        # 이미 보낸 푸시는 그대로, 아직 안 보낸 알림톡만 취소, 괜찮다는 후속 푸시
+        # 명세 4-2 응답 예시와 같음: 보낸 긴급 푸시는 그대로, 아직 안 보낸 재알림만 취소, 괜찮다는 후속 푸시
         self.assertEqual(resp, {"alert_id": first["alert_id"], "severity": "medium",
-                                "deliveries": [PUSH, CANCELED, PUSH]})
+                                "deliveries": [URGENT, RE_ALERT_CANCELED, FOLLOW_UP]})
 
     def test_응급_dismissed는_그대로(self):
         _, first = self.create(type="emergency", severity="high")
         _, resp = self.respond(first["alert_id"], "dismissed")
-        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", [PUSH, ALIMTALK, PUSH]))
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", [URGENT, RE_ALERT, FOLLOW_UP]))
 
-    def test_응급_no_response면_high로_올리고_알림톡_추가(self):
+    def test_응급_no_response면_high로_올리고_긴급_푸시_다시(self):
         _, first = self.create(type="emergency", severity="medium")
         _, resp = self.respond(first["alert_id"], "no_response")
-        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", [PUSH, ALIMTALK]))
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", [NORMAL, URGENT, RE_ALERT]))
 
     def test_사기_no_response는_그대로(self):
         _, first = self.create(type="fraud", severity="medium")
         _, resp = self.respond(first["alert_id"], "no_response")
-        self.assertEqual((resp["severity"], resp["deliveries"]), ("medium", [PUSH]))
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("medium", [NORMAL]))
 
     def test_그_밖의_선택은_그대로(self):
         for choice in ("call_119_requested", "guardian_call_requested", "guardian_check_requested"):
@@ -109,9 +137,9 @@ class StoreTest(unittest.TestCase):
 
     def test_POST에서_바로_최종_선택을_보내면_규칙_적용(self):
         _, resp = self.create(type="fraud", severity="high", user_response="dismissed")
-        self.assertEqual((resp["severity"], resp["deliveries"]), ("medium", [PUSH]))
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("medium", [NORMAL]))
         _, resp = self.create(type="emergency", severity="medium", user_response="no_response")
-        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", [PUSH, ALIMTALK]))
+        self.assertEqual((resp["severity"], resp["deliveries"]), ("high", [URGENT, RE_ALERT]))
         # 이미 최종 선택이 있으니 PATCH는 409
         self.assertEqual(self.patch_error(resp["alert_id"], "dismissed"), (409, "ALREADY_RESPONDED"))
 
@@ -128,6 +156,23 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(again, once)
         self.assertEqual(len(self.store.list()[0]["deliveries"]), 3)  # 후속 푸시를 두 번 보내지 않음
 
+    def test_PATCH_다른_알림에_쓴_request_id는_400(self):
+        # 리뷰에서 재현한 버그: 같은 request_id로 다른 알림에 PATCH하면 앞 알림 응답이 오고 뒤 알림은 안 바뀌었음
+        _, a = self.create(type="fraud", severity="high")
+        _, b = self.create(type="emergency", severity="medium")
+        body = patch("dismissed")
+        self.store.respond(a["alert_id"], body)
+        with self.assertRaises(ApiError) as ctx:
+            self.store.respond(b["alert_id"], {**body, "user_response": "no_response"})
+        self.assertEqual((ctx.exception.status, ctx.exception.code), (400, "INVALID_REQUEST"))
+        b_now = self.store.list()[1]
+        self.assertEqual((b_now["user_response"], b_now["severity"]), ("pending", "medium"))
+        # 새 request_id로 보내면 정상 처리
+        _, resp = self.respond(b["alert_id"], "no_response")
+        self.assertEqual((resp["alert_id"], resp["severity"]), (b["alert_id"], "high"))
+        # 처음 알림의 재요청은 여전히 처음 응답 그대로
+        self.assertEqual(self.store.respond(a["alert_id"], body)[1]["alert_id"], a["alert_id"])
+
     def test_PATCH_오류_코드(self):
         _, first = self.create()
         aid = first["alert_id"]
@@ -140,6 +185,28 @@ class StoreTest(unittest.TestCase):
         # 오류는 기록하지 않으므로 이후 정상 선택은 됨
         status, _ = self.respond(aid, "dismissed")
         self.assertEqual(status, 200)
+
+    def test_보호자가_열어_보면_재알림_취소(self):
+        _, first = self.create(type="emergency", severity="high")
+        status, resp = self.store.open(first["alert_id"])
+        self.assertEqual((status, resp["deliveries"]), (200, [URGENT, RE_ALERT_CANCELED]))
+        # 다시 열어도 그대로, 이후 선택도 정상 처리
+        self.assertEqual(self.store.open(first["alert_id"])[1], resp)
+        _, resp = self.respond(first["alert_id"], "dismissed")
+        self.assertEqual(resp["deliveries"], [URGENT, RE_ALERT_CANCELED, FOLLOW_UP])
+        with self.assertRaises(ApiError) as ctx:
+            self.store.open("al_999")
+        self.assertEqual((ctx.exception.status, ctx.exception.code), (404, "NOT_FOUND"))
+
+    def test_푸시_발송이_모두_실패하면_alert가_전부_failed(self):
+        # A는 kind: "alert"인 줄이 전부 failed면 어르신에게 119 직접 전화를 안내한다
+        _, resp = self.create(user_id="u_push_fail", type="emergency", severity="medium")
+        self.assertEqual(resp["deliveries"], [{**NORMAL, "status": "failed"}])
+        _, resp = self.respond(resp["alert_id"], "no_response")
+        self.assertEqual(resp["severity"], "high")
+        alerts = [d for d in resp["deliveries"] if d["kind"] == "alert"]
+        self.assertEqual(alerts, [{**NORMAL, "status": "failed"}, {**URGENT, "status": "failed"}])
+        self.assertEqual(alerts, resp["deliveries"])  # 실패한 긴급 푸시에는 재알림을 걸지 않음
 
     def test_보호자_없으면_PATCH도_빈_deliveries(self):
         _, first = self.create(user_id="u_no_guardian", type="emergency", severity="medium")
@@ -229,6 +296,13 @@ class HttpTest(unittest.TestCase):
         status, resp = self.call("PATCH", f"/alerts/{first['alert_id']}", patch("dismissed"))
         self.assertEqual((status, resp["error"]["code"]), (409, "ALREADY_RESPONDED"))
         status, resp = self.call("PATCH", "/alerts/al_999", patch("dismissed"))
+        self.assertEqual((status, resp["error"]["code"]), (404, "NOT_FOUND"))
+
+    def test_보호자_열어_봄_엔드포인트(self):
+        _, first = self.call("POST", "/alerts", req())
+        status, resp = self.call("POST", f"/alerts/{first['alert_id']}/opened")
+        self.assertEqual((status, [d["status"] for d in resp["deliveries"]]), (200, ["sent", "canceled"]))
+        status, resp = self.call("POST", "/alerts/al_999/opened")
         self.assertEqual((status, resp["error"]["code"]), (404, "NOT_FOUND"))
 
     def test_잘못된_지연_헤더는_무시(self):

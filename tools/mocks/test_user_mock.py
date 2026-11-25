@@ -1,6 +1,9 @@
 """사용자·사용량 mock 테스트.  실행: python -m unittest discover tools/mocks"""
 
+import contextlib
+import io
 import json
+import sys
 import threading
 import unittest
 import urllib.error
@@ -8,9 +11,13 @@ import urllib.request
 import uuid
 from datetime import datetime
 from http.server import ThreadingHTTPServer
+from unittest import mock
+from zoneinfo import ZoneInfoNotFoundError
 
-from _common import KST, ApiError
-from user_mock import Store, make_handler
+import _common
+import user_mock
+from _common import KST, ApiError, MockHandler, run
+from user_mock import Store, make_handler, tz
 
 NOW = datetime(2026, 11, 24, 10, 0, tzinfo=KST)
 
@@ -43,9 +50,23 @@ class UserTest(unittest.TestCase):
                          {"schedule": True, "health": False, "mood": True})
         self.assertEqual(user["preferences"]["time_hints"]["morning"], "08:00")
 
+    def test_TTS_속도(self):
+        _, user = self.store.get_user("u_123")
+        self.assertEqual(user["preferences"]["tts_speed"], 1.0)  # 기본값, DB user_preferences.tts_speed
+        self.assertEqual(self.store.get_user("u_new")[1]["preferences"]["tts_speed"], 1.0)
+
+    def test_날씨용_지역은_시_구까지만(self):
+        self.assertEqual(self.store.get_user("u_123")[1]["area_name"], "서울 강남구")
+        self.assertIsNone(self.store.get_user("u_new")[1]["area_name"])  # 지역 미설정
+        _, user = self.store.patch_user("u_123", {"area_name": None})
+        self.assertIsNone(user["area_name"])
+        _, user = self.store.patch_user("u_123", {"area_name": "대구 수성구"})
+        self.assertEqual(user["area_name"], "대구 수성구")
+
     def test_개인정보는_넣지_않음(self):
         _, user = self.store.get_user("u_123")
-        for field in ("name", "phone", "birth_year", "region_code", "region_name"):
+        # 지역은 날씨용 area_name(시·구)만. 행정동·지역 코드는 넣지 않음
+        for field in ("name", "phone", "birth_year", "region_code", "region_name", "dong"):
             self.assertNotIn(field, user)
 
     def test_처음_보는_사용자는_공유_안_함(self):
@@ -56,8 +77,18 @@ class UserTest(unittest.TestCase):
 
     def test_보호자_계정(self):
         _, user = self.store.get_user("u_789")
-        self.assertEqual((user["role"], user["guardians"], user["sharing"], user["preferences"]),
-                         ("guardian", [], None, None))
+        self.assertEqual((user["role"], user["guardians"], user["sharing"]), ("guardian", [], None))
+        # 보호자 자신의 방해 금지 시간 (하루 요약·medium 알림을 미루는 기준). 어르신용 항목은 없음
+        self.assertEqual(user["preferences"], {"quiet_hours": {"start": "22:00", "end": "07:00"}})
+        self.assertIsNone(user["area_name"])
+
+    def test_어르신과_보호자의_방해_금지_시간은_따로(self):
+        senior = self.store.get_user("u_123")[1]["preferences"]
+        guardian = self.store.get_user("u_789")[1]["preferences"]
+        self.assertIn("time_hints", senior)
+        self.assertEqual(set(guardian), {"quiet_hours"})
+        guardian["quiet_hours"]["start"] = "23:00"  # 응답을 바꿔도 저장된 값은 그대로
+        self.assertEqual(self.store.get_user("u_789")[1]["preferences"]["quiet_hours"]["start"], "22:00")
 
     def test_보호자_없는_사용자(self):
         _, user = self.store.get_user("u_no_guardian")
@@ -73,6 +104,7 @@ class UserTest(unittest.TestCase):
         self.assertEqual(error_code(self.store.get_user, "u_unknown"), (404, "USER_NOT_FOUND"))
         self.assertEqual(error_code(self.store.patch_user, "u_123", {"phone": "010"}), (400, "INVALID_REQUEST"))
         self.assertEqual(error_code(self.store.patch_user, "u_123", {"plan": "gold"}), (400, "INVALID_REQUEST"))
+        self.assertEqual(error_code(self.store.patch_user, "u_123", {"area_name": ""}), (400, "INVALID_REQUEST"))
         self.assertEqual(error_code(self.store.patch_user, "u_789", {"sharing": {"mood": True}}),
                          (400, "INVALID_REQUEST"))
 
@@ -157,6 +189,70 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(status, 201)
 
 
+class TimezoneTest(unittest.TestCase):
+    """Windows에 tzdata가 없을 때 (python -I -S로 site-packages를 빼면 재현됨)"""
+
+    def no_tzdata(self):
+        return mock.patch.object(user_mock, "ZoneInfo", side_effect=ZoneInfoNotFoundError("no tzdata"))
+
+    def test_tzdata가_없으면_서울은_고정_KST(self):
+        with self.no_tzdata():
+            self.assertIs(tz("Asia/Seoul"), KST)
+            with self.assertRaises(ZoneInfoNotFoundError):
+                tz("Europe/Paris")  # 서울 말고는 숨기지 않음
+
+    def test_tzdata가_없어도_사용량_계산은_같음(self):
+        with self.no_tzdata():
+            store = Store(clock=lambda: NOW, free_limit=2)
+            _, usage = store.today("u_123")
+            _, late = store.record(conv(started_at="2026-11-23T15:10:00+00:00"))  # 한국 11/24 00:10
+        self.assertEqual((usage["date"], usage["resets_at"]), ("2026-11-24", "2026-11-25T00:00:00+09:00"))
+        self.assertEqual(late["date"], "2026-11-24")
+
+
+class FakeServer:
+    """run()이 만든 Handler를 보기 위한 가짜 서버. serve_forever는 Ctrl+C처럼 바로 끝난다."""
+
+    def __init__(self, address, handler_cls):
+        self.address, self.handler_cls = address, handler_cls
+        FakeServer.last = self
+
+    def serve_forever(self):
+        raise KeyboardInterrupt
+
+
+class RunTest(unittest.TestCase):
+    def start(self, argv, *args, **kwargs):
+        with mock.patch.object(_common, "ThreadingHTTPServer", FakeServer),                 mock.patch.object(sys, "argv", ["mock", *argv]), contextlib.redirect_stdout(io.StringIO()):
+            run(*args, **kwargs)
+        return FakeServer.last
+
+    def test_옵션_없는_mock은_Handler_클래스를_그대로(self):
+        # todo·alert·report mock의 기존 호출 방식
+        server = self.start(["--port", "9001"], MockHandler, "설명", 8000, "이름")
+        self.assertEqual((server.address, server.handler_cls), (("127.0.0.1", 9001), MockHandler))
+
+    def test_옵션이_있는_mock은_handler_factory로(self):
+        with mock.patch.object(sys, "argv", ["user_mock.py", "--free-limit", "3"]),                 mock.patch.object(_common, "ThreadingHTTPServer", FakeServer),                 contextlib.redirect_stdout(io.StringIO()):
+            user_mock.main()
+        server = FakeServer.last
+        self.assertEqual(server.address, ("127.0.0.1", 8042))
+        self.assertTrue(issubclass(server.handler_cls, MockHandler))
+
+    def test_handler_factory가_옵션_값을_받음(self):
+        seen = []
+        server = self.start(["--free-limit", "3"], None, "설명", 8000, "이름",
+                            add_arguments=user_mock.add_arguments,
+                            handler_factory=lambda args: seen.append(args.free_limit) or MockHandler)
+        self.assertEqual((seen, server.handler_cls), ([3], MockHandler))
+
+    def test_handler와_handler_factory는_하나만(self):
+        with self.assertRaises(TypeError):
+            run(None, "설명", 8000, "이름")
+        with self.assertRaises(TypeError):
+            run(MockHandler, "설명", 8000, "이름", handler_factory=lambda args: MockHandler)
+
+
 class HttpTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -192,6 +288,12 @@ class HttpTest(unittest.TestCase):
     def test_mock_PATCH(self):
         status, user = self.call("PATCH", "/mock/users/u_patch", {"display_name": "이순자 님"})
         self.assertEqual((status, user["display_name"]), (200, "이순자 님"))
+
+    def test_명세_7_새_필드(self):
+        _, senior = self.call("GET", "/users/u_123")
+        self.assertEqual((senior["area_name"], senior["preferences"]["tts_speed"]), ("서울 강남구", 1.0))
+        _, guardian = self.call("GET", "/users/u_789")
+        self.assertEqual((guardian["sharing"], guardian["preferences"]["quiet_hours"]["end"]), (None, "07:00"))
 
     def test_없는_경로와_사용자(self):
         status, resp = self.call("GET", "/users/u_unknown")
