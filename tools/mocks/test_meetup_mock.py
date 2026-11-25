@@ -144,10 +144,11 @@ class RecommendTest(unittest.TestCase):
         self.assertIsNone(resp["empty_reason"])
 
     def test_빠져야_하는_모임은_안_나옴(self):
-        # 자리 없음, 정지된 주최자, 차단 관계, 다른 동네, 곧 시작, 너무 먼 날, 내가 연, 이미 참여, 모집 마감
+        # 자리 없음, 정지된 주최자, 차단 관계, 다른 동네, 곧 시작, 너무 먼 날, 내가 연, 이미 참여, 모집 마감,
+        # 탈퇴한 주최자
         self.store.add_interests(req("등산"))
         got = set(self.ids(user_id="u_123", limit=10))
-        self.assertTrue(got.isdisjoint({f"mt_{n}" for n in range(20, 29)}))
+        self.assertTrue(got.isdisjoint({f"mt_{n}" for n in range(20, 30)}))
 
     def test_빠지는_이유를_mock으로_볼_수_있음(self):
         _, resp = self.store.debug_meetups("u_123")
@@ -155,7 +156,24 @@ class RecommendTest(unittest.TestCase):
         self.assertEqual(reasons["mt_21"], "정지된 주최자")
         self.assertEqual(reasons["mt_22"], "차단 관계")
         self.assertEqual(reasons["mt_20"], "자리 없음")
+        self.assertEqual(reasons["mt_29"], "탈퇴한 주최자")
         self.assertIsNone(reasons["mt_12"])
+
+    def test_탈퇴한_주최자의_모임은_hobby로_찾아도_안_나옴(self):
+        # mt_29는 등산·역삼1동·5일 뒤·자리 있음 → 주최자가 탈퇴한 것 말고는 추천 조건에 맞음
+        reasons = {m["meetup_id"]: m["excluded_because"] for m in self.store.debug_meetups("u_new")[1]["meetups"]}
+        self.assertEqual(reasons["mt_29"], "탈퇴한 주최자")
+        self.assertEqual(self.ids(user_id="u_123", hobby="등산", limit=10), ["mt_12"])
+
+    def test_빈_결과_이유의_우선순위(self):
+        # no_region → no_interest → no_match: 동네가 없으면 관심사·hobby와 상관없이 no_region,
+        # 관심사가 있는데 맞는 모임이 없을 때만 no_match
+        self.assertEqual(self.store.recommend(q(user_id="u_no_region", hobby="등산"))[1]["empty_reason"],
+                         "no_region")
+        self.store.add_interests(req("탁구", user_id="u_no_region"))
+        self.assertEqual(self.store.recommend(q(user_id="u_no_region"))[1]["empty_reason"], "no_region")
+        self.store.add_interests(req("탁구", user_id="u_new"))
+        self.assertEqual(self.store.recommend(q(user_id="u_new"))[1]["empty_reason"], "no_match")
 
     def test_주최자_정보와_설명은_넣지_않음(self):
         self.store.add_interests(req("등산"))

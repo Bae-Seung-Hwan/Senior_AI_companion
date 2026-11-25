@@ -53,6 +53,7 @@ REGIONS = {"1168064000": "서울 강남구 역삼1동", "1168065000": "서울 �
 HOME_REGION = "1168064000"
 NO_REGION_USER_ID = "u_no_region"
 SUSPENDED_USERS = {"u_555"}          # 신고로 이용 정지된 주최자
+DELETED_USERS = {"u_556"}            # 탈퇴한 주최자 (모임은 남아 있어도 추천하지 않음)
 BLOCKS = {("u_123", "u_666")}        # (차단한 사람, 차단당한 사람)
 
 
@@ -85,6 +86,7 @@ def seed_meetups(now):
         (26, "u_123", "서예", "내가 연 모임", "역삼도서관", HOME_REGION, at(now, 8, 14), 6, [], "open"),
         (27, "u_219", "서예", "이미 참여한 모임", "역삼도서관", HOME_REGION, at(now, 9, 14), 6, ["u_123"], "open"),
         (28, "u_220", "등산", "모집 마감한 모임", "역삼공원 입구", HOME_REGION, at(now, 6, 9), 8, [], "closed"),
+        (29, "u_556", "등산", "탈퇴한 주최자의 모임", "역삼공원 입구", HOME_REGION, at(now, 5, 10), 8, [], "open"),
     ]
     out = {}
     for mid, host, hobby, title, place, region, starts, cap, members, status in rows:
@@ -215,6 +217,8 @@ class Store:
             return "이미 참여"
         if m["host_id"] in SUSPENDED_USERS:
             return "정지된 주최자"
+        if m["host_id"] in DELETED_USERS:
+            return "탈퇴한 주최자"
         if any(blocked_between(user_id, p) for p in m["members"]):
             return "차단 관계"
         return None
@@ -233,6 +237,7 @@ class Store:
                 if not 1 <= len(hobby) <= MAX_NAME_LENGTH:
                     raise invalid(f"hobby는 1~{MAX_NAME_LENGTH}자여야 합니다")
 
+            # 빈 결과의 이유는 no_region → no_interest → no_match 순서로 먼저 맞는 것 하나 (명세 5)
             def empty(reason):
                 return 200, {"user_id": user_id, "meetups": [], "empty_reason": reason}
 
