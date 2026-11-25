@@ -1,7 +1,7 @@
 # DB 스키마 초안 (#3)
 
 > 상태: **초안**. DB 종류는 #1 회의에서 정합니다. B 기술 조사([PR #64](https://github.com/Bae-Seung-Hwan/Senior_AI_companion/pull/64)의 `docs/research/b-stack.md`)에서 잠정 추천한 PostgreSQL 기준으로 썼습니다.
-> SQL: [schema.sql](schema.sql). PostgreSQL 15 이상이 필요합니다 (`NULLS NOT DISTINCT`). 이전 버전(355e6fc)은 PostgreSQL 18.4에서 실행해 테이블 23개 생성과 제약을 확인했고, 2차 리뷰 반영분은 아직 실행해 보지 못했습니다.
+> SQL: [schema.sql](schema.sql). PostgreSQL 15 이상이 필요합니다 (`NULLS NOT DISTINCT`). 2차 리뷰 반영분은 PostgreSQL 19.0에서 실행해 테이블 23개·뷰 2개 생성과 제약 33가지를 확인했습니다.
 > 명세는 [PR #37](https://github.com/Bae-Seung-Hwan/Senior_AI_companion/pull/37) 초안(557c732) 기준입니다 (앱 푸시만, 보호자 발송 기록 공통 형식, 할 일 중복 409, 반복 시작일은 요청 받은 날).
 
 **범위**: #3의 B 몫 전체(회원·보호자·동의, 할 일·복약, 보호자 전송, 모임, 구독)입니다.
@@ -151,7 +151,7 @@ DB에서는 숫자 ID(`bigint`)를 쓰고, API에서는 명세처럼 접두어�
 
 ### 12. 할 일 날짜와 중복
 - **`todos.date`는 항상 값이 있습니다** (`NOT NULL`). 반복 할 일의 시작일은 명세 1대로 "B가 요청을 받은 날"이라, 요청에 `date`가 없으면 B가 받을 때 사용자 시간대 기준 오늘 날짜를 채워서 저장합니다. 나중에 `created_at`을 시간대로 바꿔 계산할 필요가 없습니다
-- **`409 DUPLICATE_TODO`는 DB에서도 막습니다**: `todos_no_dup` = `(user_id, date, time, time_hint, title)` 부분 유니크 인덱스 (`deleted_at IS NULL`만)
+- **`409 DUPLICATE_TODO`는 DB에서도 막습니다**: `todos_no_dup` = `(user_id, date, time, time_hint, title)` 부분 유니크 인덱스 (`deleted_at IS NULL`만). `title`은 앞뒤 공백을 뺀 값만 저장해서(CHECK) `"치과 "`와 `"치과"`도 같은 할 일로 봅니다
   - `time` 없이 `time_hint`만 있는 할 일도 같다고 봐야 해서 `NULLS NOT DISTINCT`를 씁니다 (PostgreSQL 15+). null끼리도 같은 값으로 봅니다
   - `time_hint`도 키에 넣었습니다. "아침 혈압약"과 "저녁 혈압약"은 다른 할 일입니다
   - 같은 `request_id`면 재시도라서 `request_id UNIQUE`로 먼저 찾아 `200 OK`를 돌려주고, 이 인덱스에는 닿지 않습니다

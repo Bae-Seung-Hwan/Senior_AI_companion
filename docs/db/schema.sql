@@ -120,7 +120,7 @@ CREATE TABLE user_preferences (
     quiet_end       time     DEFAULT '07:00',          -- 둘 다 null이면 방해 금지 없음 (quiet_hours: null). 기본값은 회의 확정 전
     report_send_time time    NOT NULL DEFAULT '21:00',  -- 보호자 요약 발송 시각 (#52). 어르신 행에만 의미
     font_scale      numeric(3,2) NOT NULL DEFAULT 1.30,
-    tts_speed       numeric(3,2) NOT NULL DEFAULT 0.90,
+    tts_speed       numeric(3,2) NOT NULL DEFAULT 1.00,  -- 명세 7 preferences.tts_speed 기본 1.0
     updated_at      timestamptz NOT NULL DEFAULT now(),
     updated_by      bigint   REFERENCES users(id),     -- 보호자가 어르신 설정을 원격으로 바꾸면 보호자 id
     CHECK ((quiet_start IS NULL) = (quiet_end IS NULL))
@@ -144,7 +144,7 @@ CREATE TABLE todos (
     id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id       bigint      NOT NULL REFERENCES users(id),
     kind          text        NOT NULL CHECK (kind IN ('appointment', 'medication', 'task')),
-    title         text        NOT NULL CHECK (length(btrim(title)) > 0),
+    title         text        NOT NULL CHECK (title = btrim(title) AND length(title) > 0),  -- 앞뒤 공백은 B가 빼고 저장 ("치과 " = "치과", todos_no_dup)
     date          date        NOT NULL,                 -- 한 번: 그날 / 반복: 시작일. 요청에 date가 없으면(반복) B가 받은 날(사용자 시간대)로 채움 (명세 1)
     time          time,                                 -- 정확한 시각
     time_hint     text        CHECK (time_hint IN ('morning', 'noon', 'evening', 'bedtime')),
