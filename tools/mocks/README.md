@@ -76,9 +76,9 @@ curl -X POST http://127.0.0.1:8045/todos -H "Content-Type: application/json" -d 
 
 ## 3. 하루 요약 mock
 
-`POST /guardian-reports/daily` — 명세 3번 (PR #37 초안, 0b778ee) 형식.
+`POST /guardian-reports/daily` — 명세 3번과 공통 규칙 "보호자 발송 기록" (PR #37, 557c732) 형식.
 **공유 범위 필터는 B가 합니다.** A는 항목을 전부 채워 보내고, mock이 동의한 항목만 골라 보호자에게 넘깁니다.
-MVP 보호자 전송은 앱 푸시만이라 (2026-11-24 합의) `deliveries`는 `push`만 나옵니다. 실제로 보내지는 않습니다.
+MVP 보호자 전송은 앱 푸시만이라 (2026-11-24 합의) `deliveries`는 `channel: "push"`, `kind: "report"`, `priority: "normal"`만 나옵니다. 실제로 보내지는 않습니다.
 
 ```bash
 curl -X POST http://127.0.0.1:8048/guardian-reports/daily -H "Content-Type: application/json" -d '{
@@ -101,8 +101,16 @@ curl -X POST http://127.0.0.1:8048/guardian-reports/daily -H "Content-Type: appl
 {
   "report_id": "r_001",
   "shared_sections": ["schedule", "health", "mood"],
-  "deliveries": [{ "guardian_id": "u_789", "channel": "push", "status": "queued" }]
+  "deliveries": [
+    { "guardian_id": "u_789", "channel": "push", "kind": "report", "priority": "normal", "status": "queued", "scheduled_at": null }
+  ]
 }
+```
+
+무료 등급(`u_free_weekly`)은 주 1회 묶어 보내므로 `scheduled` + 보낼 예정 시각이 옵니다:
+
+```json
+{ "guardian_id": "u_789", "channel": "push", "kind": "report", "priority": "normal", "status": "scheduled", "scheduled_at": "2026-11-29T21:00:00+09:00" }
 ```
 
 ### 공유 범위
@@ -114,14 +122,27 @@ curl -X POST http://127.0.0.1:8048/guardian-reports/daily -H "Content-Type: appl
 | 직접 바꾸기 | `PUT /mock/share-scope/{user_id}` + `{"schedule": true, "mood": true}` |
 
 - `mood_level`도 기분 공유를 켰을 때만 보호자에게 보입니다
+- `stats.conversation_count`는 항상, `stats.completed_todos`는 **일정 공유를 켰을 때만** 보호자에게 보입니다 (할 일 수도 일정 정보)
 - 비어 있는(`null`) section은 동의했어도 `shared_sections`에 넣지 않습니다
-- 푸시 본문에는 `brief`만 넣습니다. 잠금 화면에 보일 수 있어서 section은 앱에서만 보여 줍니다
+- 푸시 본문에는 `brief`만 넣습니다. 잠금 화면에 보일 수 있어서 section·`stats`는 앱에서만 보여 줍니다
+
+#### 공유 범위를 바꾼 뒤 보호자 화면
+
+이미 보낸 요약은 **보낸 시점의 공유 범위 ∩ 지금 공유 범위**로 보여 줍니다 (A 제안, PR #66 리뷰).
+
+| 바꾼 것 | 아직 안 보낸 요약 | 이미 보낸 요약 |
+| --- | --- | --- |
+| 철회 (켜져 있던 항목을 끔) | 바로 빠짐 | **바로 빠짐** ("언제든 철회 가능") |
+| 새로 켬 | 보낼 때 들어감 | **소급하지 않음** (동의한 범위 안에서만) |
+
+보낸 뒤 철회했다가 다시 켜면, 보낸 시점에 동의했던 항목이라 다시 보입니다. `mood_level`·`completed_todos`도 같은 규칙입니다.
 
 ### mock이 돌려주는 응답
 
 | 상황 | 응답 |
 | --- | --- |
-| 정상 | `202` + `report_id`, `shared_sections`, `deliveries` (push `queued`) |
+| 정상 | `202` + `report_id`, `shared_sections`, `deliveries` (`queued`, `scheduled_at: null`) |
+| `user_id`가 `u_free_weekly` (무료 등급) | `202` + `deliveries`가 `scheduled` + `scheduled_at` (요약 날짜 다음 날부터 첫 일요일 21:00) |
 | 보내기 전에 같은 날짜로 다시 보냄 | `202` + 같은 `report_id`로 **덮어씀** |
 | 같은 `request_id`로 다시 보냄 | `202` + 지금 저장된 결과 (새로 처리하지 않음) |
 | **덮어쓰기 전의 `request_id`로 재시도** | `202` + 지금 저장된 결과 (예전 내용으로 되돌리지 않음) |
@@ -132,16 +153,18 @@ curl -X POST http://127.0.0.1:8048/guardian-reports/daily -H "Content-Type: appl
 
 > **mock에서 임시로 정한 것** (#37에서 확정되면 맞춰 고칩니다)
 >
-> - 같은 `request_id` 재요청도 `202` (1번처럼 `200`으로 바꿀지 미정)
-> - 발송 전 `deliveries` 상태는 `queued`. 무료 등급 주 1회 발송용 `scheduled` + `scheduled_at`은 #37 B 리뷰 4번이 정해지면 추가
-> - `sections`를 아예 안 보내면 셋 다 `null`로 봄
+> - 무료 등급 묶음 발송 시각(`scheduled_at`)은 **요약 날짜 다음 날부터 첫 일요일 21:00**. 명세 예시(11-22 → 11-29 21:00)에 맞춘 것이고, "하루 요약 발송 시각"이 회의에서 정해지면 맞춤
+> - 무료 등급은 테스트용 `u_free_weekly`로만 구분 (구독 `plan`과는 아직 연결하지 않음)
+> - 유료 등급 발송 전 상태는 `queued` (방해 금지 시간 등은 아직 반영하지 않음)
+> - 보냄 처리 뒤에는 `status: "sent"`, `scheduled_at: null` (공통 규칙대로 `scheduled`일 때만 값)
+> - `sections`를 아예 안 보내면 셋 다 `null`로 봄. `stats`를 안 보내면 보호자 화면의 `stats`는 `{}`
 > - 미래 날짜는 검사하지 않음 (명세에 규칙 없음)
 
 ### 확인·테스트용 (mock 전용, 실제 서버에는 없음)
 
-- `GET /guardian-reports?user_id=u_123`: 받은 요약 전체 + `guardian_view`(**보호자 화면에 실제로 보이는 내용**, 지금 공유 범위 기준), `push_body`, `share_scope`, 받은 `request_ids`
-- `POST /mock/guardian-reports/{report_id}/send`: 발송 시각이 된 것처럼 보냄 처리 (`status`가 `sent`로). 이후 같은 날짜는 `409`
-- `PUT /mock/share-scope/{user_id}`: 공유 범위 바꾸기. 이미 받은 요약의 `shared_sections`는 그대로고, `guardian_view`는 바뀐 범위로 보임
+- `GET /guardian-reports?user_id=u_123`: 받은 요약 전체 + `guardian_view`(**보호자 화면에 실제로 보이는 내용**, 위 "공유 범위를 바꾼 뒤" 규칙 적용), `push_body`, `share_scope`, 보낼 때 저장한 `sent_scope`, 받은 `request_ids`
+- `POST /mock/guardian-reports/{report_id}/send`: 발송 시각이 된 것처럼 보냄 처리 (`status`가 `sent`로, 그때 공유 범위를 `sent_scope`로 저장). 이후 같은 날짜는 `409`
+- `PUT /mock/share-scope/{user_id}`: 공유 범위 바꾸기. 이미 받은 요약의 `shared_sections`는 그대로고, `guardian_view`는 위 규칙대로 바뀜
 - `GET /health`, `X-Mock-Fail`, `X-Mock-Delay`: 1번 mock과 같음
 
 ## 4. 긴급 알림 mock

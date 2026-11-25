@@ -16,8 +16,9 @@ from report_mock import KST, ApiError, Store, make_handler
 NOW = datetime(2026, 11, 22, 21, 0, 5, tzinfo=KST)
 HEALTH = "무릎이 조금 쑤신다고 하셔서 집에서 쉬셨어요."
 
-PUSH_QUEUED = {"guardian_id": "u_789", "channel": "push", "status": "queued"}
-PUSH_SENT = {"guardian_id": "u_789", "channel": "push", "status": "sent"}
+PUSH = {"guardian_id": "u_789", "channel": "push", "kind": "report", "priority": "normal"}
+PUSH_QUEUED = {**PUSH, "status": "queued", "scheduled_at": None}
+PUSH_SENT = {**PUSH, "status": "sent", "scheduled_at": None}
 
 
 def req(**over):
@@ -139,7 +140,63 @@ class StoreTest(unittest.TestCase):
         self.store.set_scope("u_123", {"health": True})
         saved = self.store.list()[0]
         self.assertEqual(saved["shared_sections"], [])
-        self.assertEqual(set(saved["guardian_view"]["sections"]), {"health"})  # 보호자 화면은 지금 동의 기준
+        # 아직 안 보낸 요약이라 보호자 화면은 지금 동의 기준
+        self.assertEqual(set(saved["guardian_view"]["sections"]), {"health"})
+
+    def test_무료_등급은_주_1회_scheduled(self):
+        status, resp = self.submit(user_id="u_free_weekly")  # 2026-11-22 (일)
+        self.assertEqual(status, 202)
+        self.assertEqual(resp["deliveries"], [{**PUSH, "status": "scheduled", "scheduled_at": "2026-11-29T21:00:00+09:00"}])
+        _, sent = self.store.send(resp["report_id"])
+        self.assertEqual(sent["deliveries"], [PUSH_SENT])
+
+    def test_묶음_발송_시각은_다음_날부터_첫_일요일_21시(self):
+        cases = {
+            "2026-11-23": "2026-11-29T21:00:00+09:00",  # 월
+            "2026-11-28": "2026-11-29T21:00:00+09:00",  # 토
+            "2026-11-29": "2026-12-06T21:00:00+09:00",  # 일 → 다음 주 일요일
+        }
+        for day, expected in cases.items():
+            with self.subTest(day=day):
+                _, resp = self.submit(user_id="u_free_weekly", date=day)
+                self.assertEqual(resp["deliveries"][0]["scheduled_at"], expected)
+
+    def test_유료_등급은_scheduled_at_없음(self):
+        _, resp = self.submit()
+        self.assertEqual((resp["deliveries"][0]["status"], resp["deliveries"][0]["scheduled_at"]), ("queued", None))
+
+    def test_대화_횟수는_항상_완료한_할_일은_일정_공유일_때만(self):
+        self.submit()
+        self.assertEqual(self.store.list()[0]["guardian_view"]["stats"], {"conversation_count": 6})
+        self.store.set_scope("u_123", {"schedule": True})
+        self.assertEqual(self.store.list()[0]["guardian_view"]["stats"], {"conversation_count": 6, "completed_todos": 2})
+        self.assertEqual(self.store.list()[0]["push_body"], "오늘도 편안하게 잘 지내셨어요.")  # 푸시 본문에는 brief만
+
+    def test_stats가_없으면_빈_stats(self):
+        self.submit(user_id="u_share_all", stats=None)
+        self.assertEqual(self.store.list()[0]["guardian_view"]["stats"], {})
+
+    def test_보낸_뒤_새로_켠_항목은_소급하지_않음(self):
+        self.store.set_scope("u_123", {"mood": True})
+        _, resp = self.submit()
+        self.store.send(resp["report_id"])
+        self.store.set_scope("u_123", {"schedule": True, "health": True})
+        view = self.store.list()[0]["guardian_view"]
+        self.assertEqual(set(view["sections"]), {"mood"})
+        self.assertNotIn("completed_todos", view["stats"])  # 일정 공유도 보낸 뒤에 켰으니 소급 안 함
+        self.assertEqual(self.store.list()[0]["sent_scope"], {"schedule": False, "health": False, "mood": True})
+
+    def test_철회는_보낸_요약에도_바로_반영(self):
+        _, resp = self.submit(user_id="u_share_all")
+        self.store.send(resp["report_id"])
+        self.store.set_scope("u_share_all", {"schedule": False, "mood": False})
+        view = self.store.list()[0]["guardian_view"]
+        self.assertEqual(set(view["sections"]), {"health"})
+        self.assertNotIn("mood_level", view)
+        self.assertEqual(view["stats"], {"conversation_count": 6})
+        # 다시 켜면 보낸 시점에 동의했던 항목이라 다시 보임
+        self.store.set_scope("u_share_all", {"schedule": True})
+        self.assertEqual(set(self.store.list()[0]["guardian_view"]["sections"]), {"schedule", "health"})
 
     def test_오류_코드(self):
         self.assertEqual(self.error_code(user_id="u_unknown"), (404, "USER_NOT_FOUND"))

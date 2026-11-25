@@ -1,11 +1,15 @@
 """하루 요약 수신 API mock (명세 3, #48)
 
 A가 B의 실제 서버를 기다리지 않고 "하루 요약 → 보호자에게 전달" 흐름을 개발할 수 있게 하는 가짜 서버.
-docs/api-contracts.md 3번 (PR #37 초안, 0b778ee) 형식을 따른다. 공유 범위 필터는 B가 하므로,
+docs/api-contracts.md 3번과 공통 규칙 "보호자 발송 기록" (PR #37, 557c732) 형식을 따른다. 공유 범위 필터는 B가 하므로,
 A는 항목을 전부 보내고 mock이 동의한 항목만 골라낸다. 실제로 푸시를 보내지는 않는다.
 데이터는 메모리에만 저장하고, 끄면 사라진다. 표준 라이브러리만 사용하므로 설치할 것이 없다.
 
-MVP 보호자 전송은 앱 푸시만 한다 (2026-11-24 A·B 합의). 그래서 deliveries의 channel은 push뿐이다.
+MVP 보호자 전송은 앱 푸시만 한다 (2026-11-24 A·B 합의). 그래서 deliveries의 channel은 push뿐이고,
+하루 요약은 항상 kind: "report", priority: "normal"이다.
+
+보호자 화면(guardian_view)은 "보낸 시점의 공유 범위 ∩ 지금 공유 범위"로 거른다 (A 제안, PR #66 리뷰).
+철회는 지난 요약에도 바로 반영하고, 보낸 뒤 새로 켠 항목은 지난 요약에 소급하지 않는다.
 
 사용법:
     python tools/mocks/report_mock.py                 # http://127.0.0.1:8048
@@ -26,13 +30,14 @@ MVP 보호자 전송은 앱 푸시만 한다 (2026-11-24 A·B 합의). 그래서
 테스트용 user_id (mock 전용):
     u_unknown               404 USER_NOT_FOUND
     u_no_guardian           보호자가 없음 → deliveries: []
+    u_free_weekly           무료 등급 (주 1회 묶음 발송) → status: "scheduled" + scheduled_at
     u_share_all             일정·건강·기분을 모두 공유하는 사용자
     그 밖의 사용자            처음에는 아무것도 공유하지 않음 (brief만 전달, "감시 느낌 피하기" 기본값)
 """
 
 import copy
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 
 from _common import (
     KST,
@@ -52,12 +57,24 @@ MOOD_LEVELS = {"good", "normal", "low"}
 
 NO_GUARDIAN_USER_ID = "u_no_guardian"
 SHARE_ALL_USER_ID = "u_share_all"
+FREE_WEEKLY_USER_ID = "u_free_weekly"
 DEFAULT_GUARDIAN_ID = "u_789"
+
+# 무료 등급 묶음 발송 시각 (mock 임시값). 명세 3번 예시(2026-11-22 요약 → 2026-11-29 21:00)에 맞춰
+# "요약 날짜 다음 날부터 첫 일요일 21:00"으로 정했다. 회의에서 발송 시각이 정해지면 맞춘다.
+WEEKLY_SEND_WEEKDAY = 6  # 일요일 (date.weekday 기준)
+WEEKLY_SEND_TIME = time(21, 0)
 
 
 def default_scope(user_id):
     shared = user_id == SHARE_ALL_USER_ID
     return {name: shared for name in SECTIONS}
+
+
+def weekly_send_at(report_date):
+    """무료 등급 요약을 묶어 보낼 시각: 요약 날짜 다음 날부터 첫 일요일 21:00 (KST)."""
+    days = (WEEKLY_SEND_WEEKDAY - report_date.weekday()) % 7 or 7
+    return datetime.combine(report_date + timedelta(days=days), WEEKLY_SEND_TIME, KST).isoformat()
 
 
 def validate(body):
@@ -89,14 +106,30 @@ def validate(body):
     parse_datetime(body.get("generated_at"), "generated_at")
 
 
+def effective_scope(report, scope):
+    """보호자 화면에 쓰는 공유 범위.
+
+    보내기 전에는 지금 범위, 보낸 뒤에는 "보낸 시점의 범위 ∩ 지금 범위".
+    철회는 바로 반영하고, 보낸 뒤 새로 켠 항목은 지난 요약에 소급하지 않는다.
+    """
+    sent = report["sent_scope"]
+    return {n: scope[n] and (sent is None or sent[n]) for n in SECTIONS}
+
+
 def guardian_view(report, scope):
     """보호자에게 실제로 보이는 내용. 동의한 항목만 남긴다."""
+    scope = effective_scope(report, scope)
+    stats = {}
+    if "conversation_count" in report["stats"]:
+        stats["conversation_count"] = report["stats"]["conversation_count"]  # 항상 (안부 확인용)
+    if scope["schedule"] and "completed_todos" in report["stats"]:
+        stats["completed_todos"] = report["stats"]["completed_todos"]  # 할 일 수도 일정 정보
     view = {
         "report_id": report["report_id"],
         "date": report["date"],
         "brief": report["brief"],  # 공유 범위와 상관없이 항상
         "sections": {n: report["sections"][n] for n in SECTIONS if scope[n] and report["sections"][n]},
-        "stats": report["stats"],
+        "stats": stats,
     }
     if scope["mood"]:
         view["mood_level"] = report["mood_level"]
@@ -126,10 +159,23 @@ class Store:
     def _response(report):
         return copy.deepcopy({k: report[k] for k in ("report_id", "shared_sections", "deliveries")})
 
-    def _deliveries(self, user_id, status="queued"):
+    @staticmethod
+    def _deliveries(user_id, report_date):
+        """공통 규칙 "보호자 발송 기록" 형식. 무료 등급은 주 1회 묶어 보내므로 scheduled."""
         if user_id == NO_GUARDIAN_USER_ID:
             return []
-        return [{"guardian_id": DEFAULT_GUARDIAN_ID, "channel": "push", "status": status}]
+        if user_id == FREE_WEEKLY_USER_ID:
+            status, scheduled_at = "scheduled", weekly_send_at(date.fromisoformat(report_date))
+        else:
+            status, scheduled_at = "queued", None
+        return [{
+            "guardian_id": DEFAULT_GUARDIAN_ID,
+            "channel": "push",
+            "kind": "report",
+            "priority": "normal",
+            "status": status,
+            "scheduled_at": scheduled_at,
+        }]
 
     def submit(self, body):
         """POST /guardian-reports/daily. (HTTP 상태, 응답 본문)을 돌려준다."""
@@ -156,10 +202,11 @@ class Store:
                 "stats": body.get("stats") or {},
                 "generated_at": body["generated_at"],
                 "shared_sections": [n for n in SECTIONS if scope[n] and sections[n]],
-                "deliveries": self._deliveries(body["user_id"]),
+                "deliveries": self._deliveries(body["user_id"], body["date"]),
                 "request_ids": [*(old["request_ids"] if old else []), rid],
                 "received_at": self.clock().isoformat(),
                 "sent_at": None,
+                "sent_scope": None,  # 보낼 때의 공유 범위. 보낸 뒤 보호자 화면은 이것 ∩ 지금 범위
             }
             self.reports[key] = report
             self.by_id[report["report_id"]] = key
@@ -167,7 +214,10 @@ class Store:
             return 202, self._response(report)
 
     def send(self, report_id):
-        """mock 전용: 발송 시각이 된 것처럼 보냄 처리. 이후 같은 날짜는 409."""
+        """mock 전용: 발송 시각이 된 것처럼 보냄 처리. 이후 같은 날짜는 409.
+
+        보낼 때의 공유 범위를 저장해 둔다. 이후 새로 켠 항목은 이 요약에 소급하지 않는다.
+        """
         with self.lock:
             key = self.by_id.get(report_id)
             if key is None:
@@ -175,12 +225,18 @@ class Store:
             report = self.reports[key]
             if report["sent_at"] is None:
                 report["sent_at"] = self.clock().isoformat()
+                report["sent_scope"] = dict(self._scope(report["user_id"]))
                 for d in report["deliveries"]:
-                    d["status"] = "sent"
+                    # scheduled_at은 scheduled일 때만 값이 있음 (공통 규칙 "보호자 발송 기록")
+                    d.update(status="sent", scheduled_at=None)
             return 200, self._response(report)
 
     def set_scope(self, user_id, body):
-        """mock 전용: 공유 범위 바꾸기. 이미 받은 요약의 shared_sections는 그대로 둔다."""
+        """mock 전용: 공유 범위 바꾸기.
+
+        이미 받은 요약의 shared_sections는 그대로 둔다. 철회는 보낸 요약의 보호자 화면에도
+        바로 반영되고, 새로 켠 항목은 아직 안 보낸 요약에만 반영된다.
+        """
         with self.lock:
             require_user(user_id)
             if not isinstance(body, dict) or any(k not in SECTIONS or not isinstance(v, bool) for k, v in body.items()):
