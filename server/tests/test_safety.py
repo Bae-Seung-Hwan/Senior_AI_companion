@@ -15,7 +15,12 @@ from companion.safety.b_client import (
     AlertApi,
     AlertResult,
 )
-from companion.safety.detect import ClaudeFraudClassifier, DetectionError, FraudDetector, build_user_message
+from companion.safety.detect import (
+    ClaudeFraudClassifier,
+    DetectionError,
+    FraudDetector,
+    build_user_message,
+)
 from companion.safety.eval import evaluate, load_cases
 from companion.safety.flow import (
     DISMISSED,
@@ -24,7 +29,15 @@ from companion.safety.flow import (
     SafetyConversation,
     parse_choice,
 )
-from companion.safety.models import ABOUT_TO_ACT, ALREADY_ACTED, HIGH, MEDIUM, RECEIVED, REFUSED, Detection
+from companion.safety.models import (
+    ABOUT_TO_ACT,
+    ALREADY_ACTED,
+    HIGH,
+    MEDIUM,
+    RECEIVED,
+    REFUSED,
+    Detection,
+)
 
 from tests.test_b_client import StubB, error
 

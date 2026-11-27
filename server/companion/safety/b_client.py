@@ -10,7 +10,13 @@ import logging
 import time
 from dataclasses import dataclass
 
-from ..b_http import RETRY_DELAYS, VOICE_RETRY_DELAYS, VOICE_TIMEOUT, BClient, Unavailable
+from ..b_http import (
+    RETRY_DELAYS,
+    VOICE_RETRY_DELAYS,
+    VOICE_TIMEOUT,
+    BClient,
+    Unavailable,
+)
 
 log = logging.getLogger(__name__)
 
