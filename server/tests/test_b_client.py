@@ -17,18 +17,23 @@ OK_BODY = {"todo_id": "t_001", "title": "치과 예약", "next_at": "2026-11-25T
 
 
 class StubB:
-    """정해 둔 응답을 차례로 돌려주는 가짜 B 서버. 받은 요청 본문을 기록한다. 다른 경로면 404."""
+    """정해 둔 응답을 차례로 돌려주는 가짜 B 서버. 받은 요청 본문을 기록한다. 다른 경로면 404.
 
-    def __init__(self, path="/todos"):
+    prefix=True면 path로 시작하는 경로를 모두 받는다 (PATCH /alerts/{id}). requests에 (메서드, 경로)를 남긴다.
+    """
+
+    def __init__(self, path="/todos", prefix=False):
         self.responses = []
         self.received = []
+        self.requests = []
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 stub.received.append(json.loads(self.rfile.read(length)))
-                if self.path != path:
+                stub.requests.append((self.command, self.path))
+                if not (self.path.startswith(path) if prefix else self.path == path):
                     status, body = 404, {"error": {"code": "NOT_FOUND", "message": self.path}}
                 else:
                     status, body = stub.responses.pop(0)
@@ -38,6 +43,8 @@ class StubB:
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+
+            do_PATCH = do_POST
 
             def log_message(self, *args):
                 pass

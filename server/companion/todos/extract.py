@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
 import re
 
+from ..llm import LLMCallError, LLMOutputError, call_json, voice_client
 from .models import KINDS, TIME_HINTS, WEEKDAYS, Repeat, TodoDraft
 
 log = logging.getLogger(__name__)
@@ -135,13 +135,7 @@ def to_draft(raw: dict, *, utterance: str, today: dt.date, message_id: str | Non
 
 class ClaudeTodoExtractor:
     def __init__(self, client=None, model: str = DEFAULT_MODEL, effort: str = "low", api_errors=None):
-        if client is None or api_errors is None:
-            import anthropic  # 테스트에서는 가짜 client와 api_errors를 넣어서 SDK 없이도 돈다
-
-            client = client or anthropic.Anthropic()
-            api_errors = api_errors or (anthropic.APIError,)
-        self.client = client
-        self.api_errors = tuple(api_errors)  # API 오류만 잡고, 프로그래밍 오류는 그대로 터뜨린다
+        self.client, self.api_errors = voice_client(client, api_errors)  # 대화 턴 안이라 짧게 기다림
         self.model = model
         self.effort = effort  # 음성 대화라 지연이 중요 → low
 
@@ -154,28 +148,18 @@ class ClaudeTodoExtractor:
         recent: list[str] | tuple[str, ...] = (),
     ) -> list[TodoDraft]:
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=2048,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": build_user_message(utterance, today, recent)}],
-                output_config={
-                    "effort": self.effort,
-                    "format": {"type": "json_schema", "schema": TODO_SCHEMA},
-                },
-            )
-        except self.api_errors as e:  # 원문은 로그에 남기지 않는다
-            log.warning("할 일 추출 API 오류: %s", type(e).__name__)
-            raise ExtractionError(type(e).__name__) from e
-
-        if response.stop_reason in ("refusal", "max_tokens"):
-            log.warning("할 일 추출 중단: stop_reason=%s", response.stop_reason)
+            raw = call_json(self.client, self.api_errors, model=self.model, system=SYSTEM_PROMPT,
+                            content=build_user_message(utterance, today, recent), schema=TODO_SCHEMA,
+                            effort=self.effort)
+        except LLMCallError as e:  # 원문은 로그에 남기지 않는다
+            log.warning("할 일 추출 API 오류: %s", e)
+            raise ExtractionError(str(e)) from e
+        except LLMOutputError as e:
+            log.warning("할 일 추출 결과를 쓸 수 없음: %s", e)
             return []
-        text = next((b.text for b in response.content if b.type == "text"), "")
-        try:
-            items = json.loads(text)["todos"]
-        except (ValueError, KeyError, TypeError):
-            log.warning("할 일 추출 결과가 JSON이 아님")
+        items = raw.get("todos")
+        if not isinstance(items, list):
+            log.warning("할 일 추출 결과에 todos가 없음")
             return []
 
         drafts = []
