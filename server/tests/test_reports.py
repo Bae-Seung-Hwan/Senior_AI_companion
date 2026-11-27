@@ -121,7 +121,7 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(guard.template_brief(1), "오늘 AI와 한 번 이야기를 나누셨어요.")
         self.assertEqual(guard.template_brief(3), "오늘 AI와 세 번 이야기를 나누셨어요.")
         self.assertEqual(guard.template_brief(12), "오늘 AI와 12번 이야기를 나누셨어요.")
-        for n in range(0, 15):  # 어떤 횟수여도 다른 항목 내용·의료 표현이 없음
+        for n in range(15):  # 어떤 횟수여도 다른 항목 내용·의료 표현이 없음
             text = guard.template_brief(n)
             for name in ("schedule", "health", "mood"):
                 self.assertEqual(guard.mixed_words(name, text), [], (n, name))

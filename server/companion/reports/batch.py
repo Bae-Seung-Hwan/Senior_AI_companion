@@ -35,7 +35,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..clock import KST
-from .b_client import ACCEPTED, ALREADY_SENT, REJECTED, UNAVAILABLE, USER_NOT_FOUND, ReportApi
+from .b_client import (
+    ACCEPTED,
+    ALREADY_SENT,
+    REJECTED,
+    UNAVAILABLE,
+    USER_NOT_FOUND,
+    ReportApi,
+)
 from .models import DayLog
 from .writer import DEFAULT_MODEL, ClaudeReportWriter, ReportError
 
