@@ -129,11 +129,10 @@ class TodoConversation:
         parsed = parse_time_answer(text)
         draft = self.current
         if isinstance(parsed, dt.time):
-            if parsed != draft.time:
-                return replace(draft, time=parsed, time_hint=None)
-        elif parsed not in (None, UNKNOWN_TIME) and answer != YES:
-            if draft.time is not None or parsed != draft.time_hint:
-                return replace(draft, time=None, time_hint=parsed)
+            return replace(draft, time=parsed, time_hint=None) if parsed != draft.time else None
+        changed_hint = draft.time is not None or parsed != draft.time_hint
+        if parsed not in (None, UNKNOWN_TIME) and answer != YES and changed_hint:
+            return replace(draft, time=None, time_hint=parsed)
         return None
 
     def _collect(self, text: str, message_id: str | None, skip_title: str | None = None) -> int:
