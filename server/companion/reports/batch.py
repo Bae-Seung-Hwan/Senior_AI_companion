@@ -9,10 +9,15 @@
     python -m companion.reports.batch a.json b.json --b-url http://127.0.0.1:8048
 
 같은 날짜로 다시 돌려도 안전하다 (결과 파일이 그날의 기록):
-- 이미 보냈으면(sent / already_sent) 아무것도 하지 않는다 → 보호자가 실제로 받은 내용의 기록이 지워지지 않음
+- B가 받았으면(accepted) 또는 이미 보호자에게 보냈으면(already_sent) 아무것도 하지 않는다
+  → 보호자가 실제로 받은 내용의 기록이 지워지지 않음
 - B가 응답하지 않았으면(unavailable) 요약을 새로 쓰지 않고 **같은 request_id로 같은 본문을 다시 보낸다**
   (B는 받았는데 응답만 끊긴 경우에도 중복으로 처리되지 않게, 명세 공통 규칙)
-- 그 밖(쓰기 실패, 거절, 대화 없음)은 처음부터 다시 한다
+- 사용자 없음(user_not_found)·거절(rejected)도 요약을 다시 쓰지 않고 같은 본문을 다시 보낸다 (Claude를 다시 부르지 않게)
+- 그 밖(쓰기 실패, 대화 없음)은 처음부터 다시 한다
+
+상태 accepted는 "B가 받음(202)"이다. 보호자에게 실제로 갔는지는 응답의 deliveries[].status를 본다
+(무료 등급은 scheduled라 다음 주에 받음).
 
 정해진 시각에 돌리는 것(예: 보호자 요약 발송 시각 21:00 전)은 서버 스택(#1)이 정해지면 스케줄러에 붙인다.
 ANTHROPIC_API_KEY(또는 ant auth login)가 필요하다.
@@ -30,24 +35,25 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..clock import KST
-from .b_client import ACCEPTED, ALREADY_SENT, UNAVAILABLE, ReportApi
+from .b_client import ACCEPTED, ALREADY_SENT, REJECTED, UNAVAILABLE, USER_NOT_FOUND, ReportApi
 from .models import DayLog
 from .writer import DEFAULT_MODEL, ClaudeReportWriter, ReportError
 
 log = logging.getLogger(__name__)
 
-SENT = "sent"
 NO_CONVERSATION = "no_conversation"
 WRITE_FAILED = "write_failed"
-DONE = (SENT, ALREADY_SENT)  # 이 상태면 다시 돌려도 아무것도 하지 않음
+_LEGACY_SENT = "sent"  # 예전 기록 파일의 accepted
+DONE = (ACCEPTED, _LEGACY_SENT, ALREADY_SENT)  # 이 상태면 다시 돌려도 아무것도 하지 않음
+RESEND = (UNAVAILABLE, USER_NOT_FOUND, REJECTED)  # 이 상태면 기록의 본문을 그대로 다시 보냄
 
 
 @dataclass(frozen=True)
 class Outcome:
     user_id: str
     date: str
-    status: str            # sent / no_conversation / write_failed / already_sent / rejected / user_not_found / unavailable
-    request: dict | None = None
+    status: str            # accepted / no_conversation / write_failed / already_sent / rejected / user_not_found / unavailable
+    request: dict | None = None  # B에 보낸 본문. already_sent면 B가 받지 않은 본문이라 남기지 않음
     response: dict | None = None
     error_code: str | None = None
 
@@ -63,8 +69,8 @@ def run_one(day: DayLog, *, writer, api: ReportApi, previous: Outcome | None = N
     if previous is not None and previous.status in DONE:
         log.info("이미 보낸 요약이라 건너뜀 (%s %s)", day.user_id, day.date)
         return previous
-    if previous is not None and previous.status == UNAVAILABLE and previous.request:
-        log.info("B가 응답하지 않았던 요약을 같은 request_id로 다시 보냄 (%s %s)", day.user_id, day.date)
+    if previous is not None and previous.status in RESEND and previous.request:
+        log.info("지난번 요약을 같은 request_id로 다시 보냄 (%s %s, 지난번 %s)", day.user_id, day.date, previous.status)
         return _submit(api, base, previous.request)
 
     if day.senior_turn_count == 0:
@@ -83,10 +89,11 @@ def run_one(day: DayLog, *, writer, api: ReportApi, previous: Outcome | None = N
 
 def _submit(api: ReportApi, base: dict, body: dict) -> Outcome:
     result = api.submit(body)
-    status = SENT if result.status == ACCEPTED else result.status
-    if status == ALREADY_SENT:
+    if result.status == ALREADY_SENT:
+        # 기록 파일을 잃었거나 다시 쓴 요약이면, 이 본문은 보호자가 받은 것이 아니다 → 기록에 남기지 않음
         log.info("이미 보호자에게 보낸 요약이라 덮어쓰지 않음 (%s %s)", base["user_id"], base["date"])
-    return Outcome(**base, status=status, request=body, response=result.body, error_code=result.error_code)
+        return Outcome(**base, status=ALREADY_SENT, error_code=result.error_code)
+    return Outcome(**base, status=result.status, request=body, response=result.body, error_code=result.error_code)
 
 
 def record_path(out_dir: Path, user_id: str, date: str) -> Path:

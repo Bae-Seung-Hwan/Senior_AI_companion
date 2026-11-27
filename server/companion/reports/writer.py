@@ -24,11 +24,7 @@ SPEAKER_KO = {"senior": "어르신", AI: "AI"}
 SYSTEM_PROMPT = """어르신과 AI 말벗이 하루 동안 나눈 대화를 읽고, 보호자(자녀)에게 보낼 하루 요약을 JSON으로만 씁니다.
 
 말투: 보호자에게 어르신의 하루를 전하는 따뜻한 존댓말 ("~하셨어요"). 과장하거나 걱정을 부추기지 않습니다.
-
-brief (한 문장, 반드시 채움):
-- 공유 범위와 상관없이 **항상** 보호자에게 갑니다. 그래서 **일정·한 일·건강·기분 내용을 넣지 않습니다**
-- 좋은 예: "오늘도 편안하게 잘 지내셨어요.", "오늘도 AI와 여러 번 이야기를 나누셨어요."
-- 나쁜 예: "기분 좋게 지내셨어요"(기분), "병원에 다녀오셨어요"(일정), "무릎이 아프셨어요"(건강)
+(모든 보호자에게 가는 한 줄 요약은 시스템이 대화 횟수로 따로 만듭니다. 여기서는 쓰지 않습니다)
 
 sections (각각 1~2문장, 내용이 없으면 null):
 - schedule: 한 일, 다녀온 곳, 만난 사람, 챙긴 일·약 ("오후에 치과에 다녀오셨고, 혈압약도 잘 챙겨 드셨어요.")
@@ -44,14 +40,14 @@ mood_level: 하루 전체의 기분. good(즐겁거나 편안함) / normal(평�
 
 지킬 것:
 - **대화에 없는 내용을 만들지 않습니다.** 짐작한 일을 사실처럼 쓰지 않습니다
-- **의료 표현을 쓰지 않습니다.** 병명·진단·증상이라는 말 대신 있었던 일을 그대로 씁니다 ("치매 증상" X → "같은 질문을 여러 번 하셨어요" O)
+- **의료 표현을 쓰지 않습니다.** 병명·진단·증상이라는 말 대신 있었던 일을 그대로 씁니다 ("치매 증상", "건망증이 심해지셨어요" X → "같은 질문을 여러 번 하셨어요" O)
+- 병원에 가 보라거나 치료가 필요하다는 조언을 쓰지 않습니다
 - 대화 원문을 그대로 옮기지 않고 요약합니다
 - 돈·사기·응급 상황은 따로 알림이 가므로 요약에서 부풀리지 않습니다"""
 
 REPORT_SCHEMA = {
     "type": "object",
     "properties": {
-        "brief": {"type": "string"},
         "sections": {
             "type": "object",
             "properties": {name: {"anyOf": [{"type": "string"}, {"type": "null"}]} for name in SECTIONS},
@@ -60,7 +56,7 @@ REPORT_SCHEMA = {
         },
         "mood_level": {"type": "string", "enum": list(MOOD_LEVELS)},
     },
-    "required": ["brief", "sections", "mood_level"],
+    "required": ["sections", "mood_level"],
     "additionalProperties": False,
 }
 
@@ -70,7 +66,8 @@ class ReportError(Exception):
 
 
 def format_transcript(day: DayLog) -> str:
-    lines = [f"날짜: {day.date.isoformat()}", f"대화 {len(day.conversations)}번"]
+    # 보호자에게 가는 횟수(stats.conversation_count)와 같은 기준: 어르신이 한 마디라도 한 대화만
+    lines = [f"날짜: {day.date.isoformat()}", f"대화 {day.conversation_count}번"]
     for i, conv in enumerate(day.conversations, 1):
         # 시각은 한국 시간으로 (UTC로 들어와도 저녁 일을 아침 일로 쓰지 않게)
         lines.append(f"\n[대화 {i}] {conv.started_at.astimezone(KST).strftime('%H:%M')} 시작")
@@ -92,7 +89,7 @@ def _final_text(response) -> str:
 
 
 def _problems(raw: dict) -> list[str]:
-    found = guard.problems("brief", raw["brief"])
+    found = []
     for name in SECTIONS:
         value = raw["sections"].get(name)
         found += guard.problems(name, value if isinstance(value, str) else None)
@@ -129,7 +126,7 @@ class ClaudeReportWriter:
             except ReportError as e:
                 # 다시 쓰기가 실패해도 그날 요약을 버리지 않고, 첫 결과를 안전하게 고쳐서 보낸다
                 log.warning("하루 요약 다시 쓰기 실패, 첫 결과를 고쳐서 씀: %s", e)
-        return self._sanitize(raw)
+        return self._sanitize(raw, day)
 
     def _call(self, messages: list[dict]) -> tuple[dict, str]:
         try:
@@ -152,20 +149,18 @@ class ClaudeReportWriter:
             raw = json.loads(text)
         except ValueError:
             raw = None
-        if not isinstance(raw, dict) or not isinstance(raw.get("brief"), str) or not isinstance(raw.get("sections"), dict):
+        if not isinstance(raw, dict) or not isinstance(raw.get("sections"), dict):
             raise ReportError("요약 결과가 형식에 맞지 않음")
         return raw, text
 
     @staticmethod
-    def _sanitize(raw: dict) -> DailyReport:
-        """다시 써도 규칙을 어기면 안전한 쪽으로: brief는 기본 문장, 문제가 있는 section은 뺀다.
+    def _sanitize(raw: dict, day: DayLog) -> DailyReport:
+        """다시 써도 규칙을 어기면 안전한 쪽으로: 문제가 있는 section은 뺀다.
 
         section을 빼면 그 내용은 보호자에게 가지 않지만, 동의하지 않은 내용이 새는 것보다 낫다.
+        brief는 LLM 결과를 쓰지 않고 대화 횟수로 만든다 (guard.template_brief).
         """
-        brief = raw["brief"].strip()
-        if not brief or guard.brief_problems(brief) or guard.medical_problems(brief):
-            log.info("하루 요약 brief를 기본 문장으로 바꿈")
-            brief = guard.SAFE_BRIEF
+        brief = guard.template_brief(day.conversation_count)
         sections = {}
         for name in SECTIONS:
             value = raw["sections"].get(name)

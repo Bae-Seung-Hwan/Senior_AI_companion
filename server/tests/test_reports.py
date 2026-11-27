@@ -13,12 +13,12 @@ from companion.reports.b_client import (
     ALREADY_SENT,
     REJECTED,
     UNAVAILABLE,
+    USER_NOT_FOUND,
     ReportApi,
     SubmitResult,
 )
 from companion.reports.batch import (
     NO_CONVERSATION,
-    SENT,
     WRITE_FAILED,
     Outcome,
     run_file,
@@ -117,12 +117,31 @@ class ModelsTest(unittest.TestCase):
 
 
 class GuardTest(unittest.TestCase):
-    def test_brief(self):
-        self.assertEqual(guard.brief_problems("오늘도 편안하게 잘 지내셨어요."), [])
-        self.assertIn("기분", guard.brief_problems("기분 좋게 지내셨어요."))
-        self.assertIn("병원", guard.brief_problems("병원에 다녀오셨어요."))
-        self.assertTrue(guard.brief_problems("무릎이 아프셨어요."))
-        self.assertEqual(guard.brief_problems(guard.SAFE_BRIEF), [])
+    def test_brief는_대화_횟수로만(self):
+        self.assertEqual(guard.template_brief(1), "오늘 AI와 한 번 이야기를 나누셨어요.")
+        self.assertEqual(guard.template_brief(3), "오늘 AI와 세 번 이야기를 나누셨어요.")
+        self.assertEqual(guard.template_brief(12), "오늘 AI와 12번 이야기를 나누셨어요.")
+        for n in range(0, 15):  # 어떤 횟수여도 다른 항목 내용·의료 표현이 없음
+            text = guard.template_brief(n)
+            for name in ("schedule", "health", "mood"):
+                self.assertEqual(guard.mixed_words(name, text), [], (n, name))
+            self.assertEqual(guard.medical_problems(text), [], n)
+
+    def test_리뷰에서_찾은_섞임(self):
+        # (칸, 문장): 그 칸에 다른 항목 내용이 있어서 걸려야 함 (#73 리뷰)
+        cases = (
+            ("schedule", "경로당에 다녀오셨어요. 피곤하다고 하셨어요."),
+            ("mood", "잠을 못 주무셔서 처지셨어요."),
+            ("mood", "감기 기운에도 밝게 웃으셨어요."),
+            ("mood", "경로당에서 친구분들과 즐거우셨어요."),
+            ("mood", "식사를 거르셨지만 밝으셨어요."),
+            ("mood", "혈압이 높다며 속상해하셨어요."),
+            ("health", "산책하고 오셔서 다리가 부었다고 하셨어요."),
+            ("health", "외로우셔서 잠이 안 온다고 하셨어요."),
+            ("schedule", "약국에 다녀오시고 눈이 침침하다고 하셨어요."),
+        )
+        for name, text in cases:
+            self.assertTrue(guard.mixed_words(name, text), (name, text))
 
     def test_항목끼리_섞임(self):
         self.assertEqual(guard.mixed_words("schedule", "오후에 치과에 다녀오셨고, 혈압약도 잘 챙겨 드셨어요."), [])
@@ -133,7 +152,13 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(guard.mixed_words("health", "무릎이 쑤셔서 오래 걷기 힘들다고 하셨어요."), [])
 
     def test_흔한_낱말에_잘못_걸리지_않음(self):
-        self.assertEqual(guard.brief_problems("스마트폰으로 이야기 나누셨어요."), [])
+        self.assertEqual(guard.mixed_words("mood", "스마트폰으로 이야기 나누셨어요."), [])
+        self.assertEqual(guard.mixed_words("schedule", "저녁에 AI와 대화가 길어졌어요."), [])   # "화가"
+        self.assertEqual(guard.mixed_words("schedule", "AI와 대화나 하자며 웃음을 보이셨어요."), [])  # "화나"
+        self.assertEqual(guard.mixed_words("mood", "마음이 약해지셨는지 손주 이야기를 자주 하셨어요."), [])  # "약"
+        self.assertEqual(guard.mixed_words("schedule", "붓글씨 모임에 가셨어요."), [])  # "붓"
+        self.assertEqual(guard.mixed_words("schedule", "주무시기 전에 혈압약을 챙겨 드셨어요."), [])
+        self.assertIn("화가 나", guard.mixed_words("schedule", "은행 일로 화가 나셨어요."))
         self.assertEqual(guard.mixed_words("health", "기운이 없다고 하셨어요."), [])
         self.assertEqual(guard.mixed_words("health", "무릎이 걱정된다고 하셨어요."), [])
         self.assertEqual(guard.mixed_words("mood", "약간 처지셨어요."), [])
@@ -143,14 +168,21 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(guard.medical_problems("같은 질문을 여러 번 하셨어요."), [])
         self.assertEqual(guard.medical_problems("치매 증상이 보이셨어요."), ["치매", "증상"])
         self.assertEqual(guard.medical_problems(None), [])
+        for text in ("건망증이 심해지셨어요.", "기억력이 나빠지셨어요.", "인지 기능이 떨어지신 것 같아요.",
+                     "고혈압 때문에 짜게 드시지 않아요.", "당뇨가 있으셔서 단 것을 피하셨어요.",
+                     "관절염으로 무릎이 쑤셨어요.", "치료가 필요해 보여요.", "병원에 가 보셔야 할 것 같아요.",
+                     "검사를 받아 보시면 좋겠어요."):
+            self.assertTrue(guard.medical_problems(text), text)
 
 
 class WriterTest(unittest.TestCase):
     def test_요청_형식(self):
         w, messages = writer(reply(GOOD))
         report = w.write(sample_day())
-        self.assertEqual((report.brief, report.sections, report.mood_level), (GOOD["brief"], GOOD["sections"], "good"))
+        self.assertEqual((report.brief, report.sections, report.mood_level),
+                         ("오늘 AI와 세 번 이야기를 나누셨어요.", GOOD["sections"], "good"))
         call = messages.calls[0]
+        self.assertNotIn("brief", call["output_config"]["format"]["schema"]["properties"])  # LLM은 brief를 쓰지 않음
         self.assertEqual(call["model"], "claude-sonnet-5-5")
         self.assertEqual((call["betas"], call["fallbacks"]), (["server-side-fallback-2026-07-01"], "default"))
         self.assertEqual(call["output_config"]["effort"], "medium")
@@ -158,13 +190,29 @@ class WriterTest(unittest.TestCase):
         self.assertIn("08:40 어르신: 좋은 아침이에요. 혈압약 방금 먹었어요.", call["messages"][0]["content"])
 
     def test_규칙을_어기면_이유를_알려_주고_다시_쓰게_함(self):
-        bad = {**GOOD, "brief": "오늘 기분 좋게 치과에 다녀오셨어요."}
+        bad = {**GOOD, "sections": {**GOOD["sections"], "health": "치과에 다녀와서 건망증이 걱정된다고 하셨어요."}}
         w, messages = writer(reply(bad), reply(GOOD))
-        self.assertEqual(w.write(sample_day()).brief, GOOD["brief"])
+        self.assertEqual(w.write(sample_day()).sections, GOOD["sections"])
         second = messages.calls[1]["messages"]
         self.assertEqual([m["role"] for m in second], ["user", "assistant", "user"])
-        self.assertIn("brief에 일정·건강·기분 내용 '기분'", second[2]["content"])
-        self.assertIn("brief에 일정·건강·기분 내용 '치과'", second[2]["content"])
+        self.assertIn("health에 일정·기분 내용 '치과'", second[2]["content"])
+        self.assertIn("health에 의료 표현 '건망증'", second[2]["content"])
+
+    def test_LLM이_brief를_보내도_쓰지_않음(self):
+        w, _ = writer(reply({**GOOD, "brief": "병원에 다녀오셔서 기분이 좋으셨어요."}))
+        self.assertEqual(w.write(sample_day()).brief, "오늘 AI와 세 번 이야기를 나누셨어요.")
+
+    def test_답_없는_AI_인사는_횟수에_세지_않음(self):
+        day = sample_day()
+        at = dt.datetime(2026, 11, 24, 21, 0, tzinfo=KST)
+        day = DayLog(day.user_id, day.date,
+                     (*day.conversations, Conversation("c_x", at, (Turn("ai", "주무세요", at),))))
+        self.assertTrue(format_transcript(day).startswith("날짜: 2026-11-24\n대화 3번"))
+        w, _ = writer(reply(GOOD))
+        report = w.write(day)
+        self.assertEqual(report.brief, "오늘 AI와 세 번 이야기를 나누셨어요.")
+        body = report.to_request(request_id="r", day=day, generated_at=NOW)
+        self.assertEqual(body["stats"]["conversation_count"], 3)
 
     def test_section에_다른_항목이_섞이면_다시_쓰고_그래도_섞이면_뺌(self):
         mixed = {**GOOD, "sections": {**GOOD["sections"],
@@ -176,11 +224,9 @@ class WriterTest(unittest.TestCase):
         self.assertEqual(report.sections["schedule"], GOOD["sections"]["schedule"])
 
     def test_다시_써도_어기면_안전한_쪽으로(self):
-        bad = {"brief": "병원에 다녀오셨어요.",
-               "sections": {**GOOD["sections"], "health": "치매 증상이 조금 보이셨어요."}, "mood_level": "low"}
+        bad = {"sections": {**GOOD["sections"], "health": "치매 증상이 조금 보이셨어요."}, "mood_level": "low"}
         w, _ = writer(reply(bad), reply(bad))
         report = w.write(sample_day())
-        self.assertEqual(report.brief, guard.SAFE_BRIEF)
         self.assertIsNone(report.sections["health"])                  # 의료 표현 section은 뺌
         self.assertEqual(report.sections["mood"], GOOD["sections"]["mood"])
         self.assertEqual(report.mood_level, "low")
@@ -209,14 +255,14 @@ class WriterTest(unittest.TestCase):
         self.assertEqual(w.write(sample_day()).sections, {"schedule": None, "health": None, "mood": "편안해하셨어요."})
 
     def test_다른_모델이_이어_쓰면_마지막_글만(self):
-        partial = SimpleNamespace(type="text", text='{"brief": "오늘')
+        partial = SimpleNamespace(type="text", text='{"sections": {"schedule": "오늘')
         fallback = SimpleNamespace(type="fallback")
         w, _ = writer(reply(GOOD, before=(partial, fallback)))
-        self.assertEqual(w.write(sample_day()).brief, GOOD["brief"])
+        self.assertEqual(w.write(sample_day()).sections, GOOD["sections"])
 
     def test_실패는_ReportError(self):
         for r in (reply(GOOD, stop_reason="refusal"), reply(GOOD, stop_reason="max_tokens"),
-                  reply("요약할 수 없어요"), reply({"brief": 1}), ConnectionError("down")):
+                  reply("요약할 수 없어요"), reply({"sections": 1}), ConnectionError("down")):
             w, _ = writer(r)
             with self.assertRaises(ReportError):
                 w.write(sample_day())
@@ -258,7 +304,7 @@ class BatchTest(unittest.TestCase):
     def test_보냄(self):
         api = FakeApi()
         outcome = self.run_one(api=api)
-        self.assertEqual((outcome.status, outcome.response["report_id"]), (SENT, "r_001"))
+        self.assertEqual((outcome.status, outcome.response["report_id"]), (ACCEPTED, "r_001"))
         self.assertEqual(api.bodies[0]["request_id"], "rid-1")
         self.assertEqual(outcome.request, api.bodies[0])
 
@@ -280,6 +326,10 @@ class BatchTest(unittest.TestCase):
                                (SubmitResult(UNAVAILABLE), UNAVAILABLE)):
             self.assertEqual(self.run_one(api=FakeApi(result)).status, status)
 
+    def test_이미_보냈으면_이번_본문은_기록하지_않음(self):
+        outcome = self.run_one(api=FakeApi(SubmitResult(ALREADY_SENT, error_code="ALREADY_SENT")))
+        self.assertIsNone(outcome.request)  # 보호자가 받은 것이 아니므로
+
 
 class RerunTest(unittest.TestCase):
     """같은 날짜로 다시 돌릴 때."""
@@ -292,7 +342,7 @@ class RerunTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_보낸_뒤_다시_돌리면_아무것도_안_함(self):
-        sent = Outcome("u_123", "2026-11-24", SENT, request={"request_id": "rid-1", "brief": "보낸 것"})
+        sent = Outcome("u_123", "2026-11-24", ACCEPTED, request={"request_id": "rid-1", "brief": "보낸 것"})
         batch.save(sent, self.out)
         api, w = FakeApi(), mock.Mock()
         outcome = run_file(SAMPLE, writer=w, api=api, out_dir=self.out)
@@ -305,15 +355,30 @@ class RerunTest(unittest.TestCase):
         batch.save(Outcome("u_123", "2026-11-24", "unavailable", request=body), self.out)
         api, w = FakeApi(), mock.Mock()
         outcome = run_file(SAMPLE, writer=w, api=api, out_dir=self.out)
-        self.assertEqual((outcome.status, api.bodies, w.write.call_count), (SENT, [body], 0))
-        self.assertEqual(batch.load(self.out, "u_123", "2026-11-24").status, SENT)
+        self.assertEqual((outcome.status, api.bodies, w.write.call_count), (ACCEPTED, [body], 0))
+        self.assertEqual(batch.load(self.out, "u_123", "2026-11-24").status, ACCEPTED)
+
+    def test_사용자_없음_거절이면_Claude를_다시_부르지_않고_같은_본문(self):
+        body = {"request_id": "rid-1", "brief": "처음 쓴 요약"}
+        for status in (USER_NOT_FOUND, REJECTED):
+            batch.save(Outcome("u_123", "2026-11-24", status, request=body), self.out)
+            api, w = FakeApi(), mock.Mock()
+            outcome = run_file(SAMPLE, writer=w, api=api, out_dir=self.out)
+            self.assertEqual((outcome.status, api.bodies, w.write.call_count), (ACCEPTED, [body], 0), status)
+
+    def test_예전_기록의_sent도_보낸_것으로(self):
+        old = Outcome("u_123", "2026-11-24", "sent", request={"request_id": "rid-1"})
+        batch.save(old, self.out)
+        api, w = FakeApi(), mock.Mock()
+        self.assertEqual(run_file(SAMPLE, writer=w, api=api, out_dir=self.out), old)
+        self.assertEqual((api.bodies, w.write.call_count), ([], 0))
 
     def test_쓰기_실패였으면_처음부터_다시(self):
         batch.save(Outcome("u_123", "2026-11-24", WRITE_FAILED), self.out)
         api = FakeApi()
         outcome = run_file(SAMPLE, writer=FakeWriter(DailyReport(GOOD["brief"], GOOD["sections"], "good")),
                            api=api, out_dir=self.out)
-        self.assertEqual((outcome.status, len(api.bodies)), (SENT, 1))
+        self.assertEqual((outcome.status, len(api.bodies)), (ACCEPTED, 1))
 
     def test_입력_파일_하나가_깨져도_나머지는_계속(self):
         bad = self.out / "bad.json"
@@ -326,7 +391,7 @@ class RerunTest(unittest.TestCase):
               mock.patch.object(batch.logging, "basicConfig")):
             code = batch.main()
         self.assertEqual(code, 1)  # 실패가 있었음을 종료 코드로 알림
-        self.assertEqual(batch.load(self.out / "rec", "u_123", "2026-11-24").status, SENT)
+        self.assertEqual(batch.load(self.out / "rec", "u_123", "2026-11-24").status, ACCEPTED)
 
 
 class ReportApiTest(unittest.TestCase):
