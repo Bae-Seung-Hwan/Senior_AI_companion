@@ -10,14 +10,18 @@ import logging
 import time
 from dataclasses import dataclass
 
-from ..b_http import RETRY_DELAYS, BClient, Unavailable
+from ..b_http import (
+    RETRY_DELAYS,
+    VOICE_RETRY_DELAYS,
+    VOICE_TIMEOUT,
+    BClient,
+    Unavailable,
+)
 
 log = logging.getLogger(__name__)
 
-# 음성 대화 중에는 어르신이 기다리므로 짧게: 3초 × 2번 + 1초 ≈ 최대 7초.
+# 음성 대화 중에는 짧게 기다린다 (b_http.VOICE_TIMEOUT).
 # 실패하면 "조금 있다가 다시 말씀해 주세요"로 안내한다 (백그라운드 재시도는 음성 연결 때 추가)
-VOICE_TIMEOUT = 3.0
-VOICE_RETRY_DELAYS = (1,)
 
 CREATED = "created"            # 201 새로 등록
 REPLAYED = "replayed"          # 200 같은 request_id 재요청 (처음 결과)

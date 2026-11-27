@@ -19,6 +19,9 @@ from dataclasses import dataclass
 log = logging.getLogger(__name__)
 
 RETRY_DELAYS = (1, 3, 10)  # 공통 규칙
+# 대화 턴 안에서 부를 때 (할 일 등록, 긴급 알림): 어르신이 기다리므로 3초 × 2번 + 1초 ≈ 최대 7초
+VOICE_TIMEOUT = 3.0
+VOICE_RETRY_DELAYS = (1,)
 
 
 @dataclass(frozen=True)
@@ -57,20 +60,27 @@ class BClient:
 
     def post(self, path: str, body: dict) -> Response:
         """JSON POST. 재시도를 다 해도 안 되면 Unavailable."""
+        return self._send("POST", path, body)
+
+    def patch(self, path: str, body: dict) -> Response:
+        """JSON PATCH (명세 4-2). 본문에 request_id가 있어서 다시 보내도 안전하다."""
+        return self._send("PATCH", path, body)
+
+    def _send(self, method: str, path: str, body: dict) -> Response:
         for attempt in range(len(self.retry_delays) + 1):
             if attempt:
                 self.sleep(self.retry_delays[attempt - 1])
             try:
-                return self._post_once(path, body)
+                return self._send_once(method, path, body)
             except _Retryable as e:
                 log.warning("B %s 재시도 대상 (%d번째 시도): %s", path, attempt + 1, e)
         raise Unavailable(path)
 
-    def _post_once(self, path: str, body: dict) -> Response:
+    def _send_once(self, method: str, path: str, body: dict) -> Response:
         req = urllib.request.Request(
             f"{self.base_url}{path}",
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            method="POST",
+            method=method,
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
         try:
