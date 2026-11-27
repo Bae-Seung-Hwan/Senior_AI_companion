@@ -457,7 +457,7 @@ class EvalTest(unittest.TestCase):
                 return answers[utterance]
 
         report = evaluate(CASES, FraudDetector(Oracle(), clock=lambda: NOW))
-        self.assertEqual((report["detection_rate"], report["false_positive_rate"], report["refused_ok"],
+        self.assertEqual((report["detection_rate"], report["false_positive_rate"], report["quiet_ok"],
                           report["category_accuracy"], report["misses"]), (1.0, 0.0, 1.0, 1.0, []))
 
 
