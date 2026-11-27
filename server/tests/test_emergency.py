@@ -139,7 +139,7 @@ class SeverityTest(unittest.TestCase):
 
 class DetectorTest(unittest.TestCase):
     def test_응급이면_감지(self):
-        det, c = emergency_detector(ev(category="chest", stage="mild"))
+        det, _ = emergency_detector(ev(category="chest", stage="mild"))
         d = det.detect("가슴이 좀 뻐근해", message_id="m_1")
         self.assertEqual((d.type, d.category, d.stage, d.severity), (EMERGENCY, "chest", MILD, HIGH))
 
