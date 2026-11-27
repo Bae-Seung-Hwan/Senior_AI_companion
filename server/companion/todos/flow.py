@@ -18,10 +18,11 @@ import uuid
 from collections import deque
 from dataclasses import replace
 
+from ..clock import KST
 from . import speech
 from .b_client import CREATED, DUPLICATE, REJECTED, REPLAYED, USER_NOT_FOUND, TodoApi
 from .extract import ExtractionError
-from .models import KST, TodoDraft
+from .models import TodoDraft
 from .parse import NO, UNKNOWN_TIME, YES, parse_time_answer, parse_yes_no
 
 log = logging.getLogger(__name__)

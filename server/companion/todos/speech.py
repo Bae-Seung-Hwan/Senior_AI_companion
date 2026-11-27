@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 
-from .models import KST, WEEKDAYS, TodoDraft
+from ..clock import KST
+from .models import WEEKDAYS, TodoDraft
 
 _WEEKDAY_KO = dict(zip(WEEKDAYS, "월화수목금토일", strict=True))
 _HINT_KO = {"morning": "아침", "noon": "점심", "evening": "저녁", "bedtime": "주무시기 전"}

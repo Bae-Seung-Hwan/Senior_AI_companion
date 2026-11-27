@@ -33,3 +33,6 @@ Thumbs.db
 
 # LLM 벤치 결과 (개인 실행 기록)
 tools/llm-bench/results/
+
+# 하루 요약 배치 결과 (요약 문장 = 민감정보)
+.reports/

@@ -17,9 +17,9 @@ OK_BODY = {"todo_id": "t_001", "title": "치과 예약", "next_at": "2026-11-25T
 
 
 class StubB:
-    """정해 둔 응답을 차례로 돌려주는 가짜 B 서버. 받은 요청 본문을 기록한다."""
+    """정해 둔 응답을 차례로 돌려주는 가짜 B 서버. 받은 요청 본문을 기록한다. 다른 경로면 404."""
 
-    def __init__(self):
+    def __init__(self, path="/todos"):
         self.responses = []
         self.received = []
         stub = self
@@ -28,7 +28,10 @@ class StubB:
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 stub.received.append(json.loads(self.rfile.read(length)))
-                status, body = stub.responses.pop(0)
+                if self.path != path:
+                    status, body = 404, {"error": {"code": "NOT_FOUND", "message": self.path}}
+                else:
+                    status, body = stub.responses.pop(0)
                 data = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")

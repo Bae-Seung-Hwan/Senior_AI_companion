@@ -8,7 +8,6 @@ from dataclasses import dataclass
 KINDS = ("appointment", "medication", "task")
 TIME_HINTS = ("morning", "noon", "evening", "bedtime")
 WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
-KST = dt.timezone(dt.timedelta(hours=9))
 
 
 @dataclass(frozen=True)
