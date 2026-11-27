@@ -108,13 +108,14 @@ python -m companion.reports.batch samples/day_u_123.json --out ../.reports
 - **입력**: 대화 기록 저장(#18)이 생기면 파일 대신 거기서 읽습니다
 - **실행 시각**: 보호자 요약 발송 시각(명세 7 `report_send_time`, 기본 21:00) 전에 돌리는 스케줄러는 서버 스택(#1)이 정해지면 붙입니다
 
-## 사기 감지 (#25, 명세 4 긴급 알림 #28)
+## 사기·응급 감지 (#25, #26, 명세 4 긴급 알림 #28)
 
-어르신 말에서 사기 피해로 이어질 수 있는 상황을 찾아, 경고를 들려 드리고 B를 통해 보호자에게 알립니다. 응급 감지(#26)는 다음 PR에서 같은 구조로 붙입니다.
+어르신 말에서 사기 피해나 응급 상황을 찾아, 경고·연결 제안을 들려 드리고 B를 통해 보호자에게 알립니다. 두 감지기는 같은 구조(규칙 문지기 → Claude 판단 → 실패 시 규칙 안전망)이고, `SafetyConversation`이 **응급 먼저, 다음 사기** 순서로 돌립니다.
 
 | 파일 | 하는 일 |
 | --- | --- |
 | [`companion/safety/flow.py`](companion/safety/flow.py) | 대화 하나의 흐름. 감지 → **곧바로** B 알림(4-1) + 경고 → 어르신 선택을 B에(4-2) |
+| [`companion/safety/emergency_rules.py`](companion/safety/emergency_rules.py) | 응급 1단계 규칙. 몸·위험 낱말(넘어짐, 가슴, 숨, 말·마비, 쓰러짐, 피, 불·가스, 죽고 싶다 등)이 없으면 LLM을 부르지 않음. 안전망은 지금 일어나는 분명한 위급 표현만 |
 | [`companion/safety/rules.py`](companion/safety/rules.py) | 1단계 규칙. 돈·개인정보·기관 사칭 낱말이 없으면 LLM을 부르지 않음(문지기), LLM이 실패하면 돈·정보 요구 + 압박·사칭이 함께 있을 때만 알림(안전망) |
 | [`companion/safety/detect.py`](companion/safety/detect.py) | 2단계 Claude Haiku 5.5 판단 (구조화 출력): 사기인지, 유형, 어디까지 갔는지 |
 | [`companion/safety/models.py`](companion/safety/models.py) | 감지 결과 → severity·보호자용 설명·명세 4-1 요청 본문 |
@@ -142,18 +143,35 @@ python -m companion.reports.batch samples/day_u_123.json --out ../.reports
 - B가 응답하지 않아도 경고는 그대로 하고, 보내지 못한 4-1·4-2는 `flush()`에서 **같은 `request_id`로** 다시 보냅니다. 사용자 없음·형식 거절처럼 다시 보내도 같은 실패는 다시 보내지 않습니다 (원문이 B로 되풀이해 가지 않게)
 - 발화 원문은 로그에 남기지 않습니다. 감지 기록(`events`)에도 원문은 없고 유형·단계·severity·선택만 남깁니다 (원문은 B에 `evidence.text`로만 감, 명세 4)
 
+### 응급 감지 (#26)
+
+- 유형: 넘어짐, 가슴 통증·답답함, 숨쉬기 힘듦, 말이 어눌함·몸 한쪽 힘 빠짐, 쓰러짐·정신 잃음, 크게 다침·피, 목에 걸림, 불·연기·가스, 함께 있는 분이 위급함, 죽고 싶다는 말, 그 밖의 도움 요청
+- 단계: 지금 심함(`acute`) / 지금이지만 견딜 만함(`mild`) / 이미 지나 괜찮음(`past`, 알리지 않음)
+- severity: `acute`는 `high`. `mild`라도 시간이 중요한 유형(가슴, 숨, 말·마비, 쓰러짐, 목에 걸림, 불·가스, 다른 분, 죽고 싶다)은 `high`, 넘어짐·다침만 `medium`
+- **진단하지 않습니다.** 보호자용 설명은 어르신이 말한 사실만 적습니다 ("뇌졸중 의심" X → "말이 어눌하거나 몸 한쪽에 힘이 없다고 하심"). 어르신에게도 병명을 말하지 않고, 누구나 할 수 있는 것("무리해서 일어나지 마세요", "다친 곳을 천으로 꾹 눌러 주세요", "밖으로 나가 주세요")과 연결 제안만 합니다
+- 놓치면 안 되므로 사기와 달리 LLM 확신이 낮아도(`low`) 알리고, "헷갈리면 응급 쪽으로" 판단하게 했습니다. 관용 표현("더워 죽겠어", "배불러 죽겠어")과 마음의 답답함은 응급이 아닙니다
+- 보호자에게 갔으면 "119에 연결해 드릴까요, 보호자분께 전화해 드릴까요?", **못 갔으면(보호자 없음, 발송 실패, B 장애) "지금 119에 전화해 주세요"**로 안내합니다 (명세 4-1)
+- 어르신 선택: "119 불러 줘"(`call_119_requested`), "딸한테 전화해 줘"(`guardian_call_requested`), "괜찮아"(`dismissed`, 응급은 B가 severity를 그대로 둠), 대답 없음 `expire()`(`no_response`, B가 `high`로 올림). 119와 보호자가 함께 나오면 119로 봅니다. 그냥 "네"는 한쪽만 물었을 때만 그쪽으로 보고, 둘 다 물었으면 119만 다시 묻습니다 (그다음 "네"는 119)
+- "안 괜찮아"는 괜찮다는 뜻이 아니라서 다시 묻고, "119는 부르지 마", "아들한테 연락하지 마"는 그 전화를 거는 요청으로 보지 않습니다 ("아들한테 연락하지 말고 119 불러"는 119)
+- "119 불러 줘"처럼 분명히 고른 대답은 그 자체가 도움 요청이라 응급 감지를 다시 돌리지 않습니다 (새 알림이 또 나가지 않게). "어제 넘어졌었는데, 아들이라며 돈 보내래"처럼 지난 응급 뒤의 사기는 따로 봅니다
+- 전화를 걸어야 하는 선택이면 `SafetyConversation.action`(`call_119` / `call_guardian` / `call_109`)에 남기고, 앱(#27)이 연결합니다
+- **죽고 싶다는 말**: 보호자에게 `high`로 알리고, 어르신에게는 "혼자 견디지 않으셔도 돼요. 109에 전화하시면 언제든 이야기를 들어 줘요"와 보호자 전화를 제안합니다. 지난 일처럼 말해도 알립니다. 명세 4에 109 연결 값이 없어서 109를 고르면 **4-2를 보내지 않습니다** (`call_119_requested`로 보내면 보호자가 구급차를 부른 줄 압니다). B에는 `high`/`pending`으로 남아 보호자 재알림이 계속됩니다 (회의 안건)
+
 ### 테스트 문장 세트
 
-[`samples/fraud_cases.json`](samples/fraud_cases.json): 알려야 할 문장 24개, 거절한 사기 3개, 사기 아닌 문장 20개 (모두 지어낸 문장). 사기 아닌 문장은 용돈·적금·공과금·사기 뉴스처럼 헷갈리기 쉬운 것으로 골랐습니다.
+- [`samples/fraud_cases.json`](samples/fraud_cases.json): 알려야 할 문장 24개, 거절한 사기 3개, 사기 아닌 문장 20개. 사기 아닌 문장은 용돈·적금·공과금·사기 뉴스처럼 헷갈리기 쉬운 것으로 골랐습니다
+- [`samples/emergency_cases.json`](samples/emergency_cases.json): 알려야 할 문장 26개, 이미 지난 응급 3개, 응급 아닌 문장 20개. 응급 아닌 문장은 관용 표현("더워 죽겠어"), 가벼운 아픔, 남의 일·뉴스, 마음의 답답함처럼 헷갈리기 쉬운 것으로 골랐습니다
+- 모두 지어낸 문장입니다
 
 ```bash
 cd server
 python -m unittest tests.test_safety      # CI: 문지기가 사기 문장을 하나도 놓치지 않는지 등 (LLM 안 부름)
 pip install -r requirements.txt
-python -m companion.safety.eval --show-misses   # 실제 Haiku로 감지율·오탐률 (ANTHROPIC_API_KEY, 비용 있음)
+python -m companion.safety.eval --show-misses                   # 사기: 실제 Haiku로 감지율·오탐률 (ANTHROPIC_API_KEY, 비용 있음)
+python -m companion.safety.eval --kind emergency --show-misses  # 응급
 ```
 
-결과 (2026-11-27, Claude Haiku 5.5, effort medium, 47문장 한 번):
+사기 결과 (2026-11-27, Claude Haiku 5.5, effort medium, 47문장 한 번):
 
 | 감지율 | 오탐률 | 거절한 사기를 칭찬으로 | 유형 맞춤 |
 | --- | --- | --- | --- |

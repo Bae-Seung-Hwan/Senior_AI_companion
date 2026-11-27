@@ -46,6 +46,45 @@ def fraud_severity(category: str, stage: str) -> str:
     return HIGH if category in _URGENT_CATEGORIES else MEDIUM
 
 
+# --- 응급 (#26) ---
+
+# 응급 유형 → 보호자에게 보여 줄 한 줄 설명. **진단처럼 들리지 않게** 어르신이 말한 사실만 적는다
+# ("뇌졸중 의심" X → "말이 어눌하거나 몸 한쪽에 힘이 없다고 하심")
+EMERGENCY_CATEGORIES = {
+    "fall": "넘어지셨다고 하심",
+    "chest": "가슴이 아프거나 조이거나 답답하다고 하심",
+    "breathing": "숨쉬기 힘들다고 하심",
+    "speech_or_weakness": "말이 어눌하거나 몸 한쪽에 힘이 없다고 하심",
+    "fainting": "쓰러지거나 정신을 잃을 것 같다고 하심",
+    "bleeding_injury": "크게 다치거나 피가 난다고 하심",
+    "choking": "목에 무언가 걸렸다고 하심",
+    "fire_gas": "불이나 연기, 가스 냄새 등 집 안의 위험을 말씀하심",
+    "other_person": "함께 있는 분이 위급하다고 하심",
+    "self_harm": "죽고 싶다는 등 마음이 많이 힘들다고 하심",
+    "other": "급히 도움이 필요하다고 하심",
+}
+
+ACUTE = "acute"     # 지금 일어나고 있고 심함 (못 일어남, 많이 아픔, 숨이 참)
+MILD = "mild"       # 지금이지만 견딜 만하다고 함 ("넘어졌는데 괜찮아")
+RECENT = "recent"   # 방금·오늘 있었다가 지금은 괜찮다고 함 ("방금 잠깐 정신을 잃었어", "아까 말이 안 나왔는데 지금은 괜찮아")
+PAST = "past"       # 오늘 이전의 일이거나 이미 진료를 받음 ("어제 넘어졌는데 이제 괜찮아") → 알리지 않음
+EMERGENCY_STAGES = (ACUTE, MILD, RECENT, PAST)
+
+_EMERGENCY_STAGE_NOTE = {ACUTE: "", MILD: " (지금은 견딜 만하다고 하심)", RECENT: " (방금 있었고 지금은 괜찮다고 하심)",
+                         PAST: ""}
+
+# 견딜 만하다고 하거나 방금 지나갔다고 해도 미루면 안 되는 유형: 본인이 괜찮다고 해도 시간이 중요하다
+# (방금 잠깐 정신을 잃었거나 말이 안 나왔다가 돌아온 것도 바로 도움을 받아야 하는 경우가 많다)
+_ALWAYS_HIGH = {"chest", "breathing", "speech_or_weakness", "fainting", "choking", "fire_gas", "other_person",
+                "self_harm"}
+
+
+def emergency_severity(category: str, stage: str) -> str:
+    if stage == ACUTE or category in _ALWAYS_HIGH:
+        return HIGH
+    return MEDIUM
+
+
 @dataclass(frozen=True)
 class Detection:
     type: str
@@ -58,14 +97,28 @@ class Detection:
 
     @property
     def should_alert(self) -> bool:
+        if self.type == EMERGENCY:
+            # "죽고 싶다"는 지난 일처럼 말해도 알린다
+            if self.category == "self_harm":
+                return True
+            if self.stage == PAST:
+                return False
+            if self.stage == RECENT:  # 방금 지나간 일: 시간이 중요한 유형만 (가볍게 베인 것은 알리지 않음)
+                return self.category in _ALWAYS_HIGH
+            return True
         return self.stage != REFUSED
 
     @property
     def severity(self) -> str:
+        if self.type == EMERGENCY:
+            return emergency_severity(self.category, self.stage)
         return fraud_severity(self.category, self.stage)
 
     @property
     def reason(self) -> str:
+        if self.type == EMERGENCY:
+            text = EMERGENCY_CATEGORIES.get(self.category, EMERGENCY_CATEGORIES["other"])
+            return text + _EMERGENCY_STAGE_NOTE.get(self.stage, "")
         return FRAUD_CATEGORIES.get(self.category, FRAUD_CATEGORIES["other"]) + " 의심" + _STAGE_NOTE.get(self.stage, "")
 
     def to_alert_request(self, *, request_id: str, user_id: str, conversation_id: str) -> dict:
