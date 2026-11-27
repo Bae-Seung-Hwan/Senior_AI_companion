@@ -21,21 +21,36 @@ _NO_PHRASES = ("아니", "아뇨", "안 해", "안해", "안 할", "안할", "�
 _YES_PATTERNS = re.compile(
     r"그래(?!도)|좋아|좋습니다|좋지|등록해|해 ?줘|해 ?주|부탁|그렇게|맞아|맞습니다|알려 ?줘|알려 ?주|그럼요"
 )
-_YES_FIRST_WORDS = ("네", "예", "응", "어", "넹", "넵", "그럼")
+# "네네", "예예", "응응"처럼 겹쳐 말해도 동의
+_YES_FIRST_WORD = re.compile(r"(?:네|예|응|어|넹|넵|그럼)+")
+# 거절이 아닌 "말고"·"지 마" ("잊지 말고 꼭 알려 줘"). 거절 표현을 찾기 전에 지운다
+_NOT_REFUSAL = ("잊지 말", "잊지 마", "까먹지 말", "까먹지 마", "빼먹지 말", "빼먹지 마")
+# 못 들어서 되묻는 말. STT가 물음표를 빼먹을 수 있어서 낱말로도 본다
+_ASKING_BACK = ("뭐라고", "뭐라구", "뭐라 했", "뭐라 하", "다시 말", "다시 한", "다시 얘기", "다시 이야기",
+                "못 들", "못들", "안 들", "안들", "잘 안 들", "뭐요", "뭐예요", "뭐에요", "무슨 말")
 
 
 def _normalize(text: str) -> str:
     return re.sub(r"[.,!?~…]+", " ", text).strip()
 
 
+def is_asking_back(text: str) -> bool:
+    """"네?", "예? 뭐라고요?"처럼 못 들어서 되묻는 말인지. 이런 대답은 동의로 보지 않는다."""
+    return "?" in text or "？" in text or any(w in _normalize(text) for w in _ASKING_BACK)
+
+
 def parse_yes_no(text: str) -> str | None:
     t = _normalize(text)
     if not t:
         return None
+    for phrase in _NOT_REFUSAL:
+        t = t.replace(phrase, " ")
     if any(p in t for p in _NO_PHRASES):
         return NO
-    first = t.split()[0]
-    if first in _YES_FIRST_WORDS or _YES_PATTERNS.search(t):
+    if is_asking_back(text):
+        return None  # "네?"는 동의가 아니라 못 들었다는 뜻 → 다시 읽어 드림
+    words = t.split()
+    if (words and _YES_FIRST_WORD.fullmatch(words[0])) or _YES_PATTERNS.search(t):
         return YES
     return None
 

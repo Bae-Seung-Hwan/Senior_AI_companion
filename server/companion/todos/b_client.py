@@ -99,9 +99,13 @@ class TodoApi:
         if not isinstance(err, dict):  # {"error": "bad request"} 같은 형식
             err = {}
         code = err.get("code")
-        log.info("할 일 등록 거절: HTTP %d %s", e.code, code)  # message·원문은 남기지 않음
+        # message·원문은 남기지 않음
         if e.code == 409 and code == "DUPLICATE_TODO":
+            log.info("할 일 등록: 이미 있음 (HTTP %d %s)", e.code, code)
             return RegisterResult(DUPLICATE, error_code=code, existing_todo_id=err.get("existing_todo_id"))
         if e.code == 404 and code == "USER_NOT_FOUND":
+            log.info("할 일 등록: 사용자 없음 (HTTP %d %s)", e.code, code)
             return RegisterResult(USER_NOT_FOUND, error_code=code)
+        # 그 밖의 4xx는 A 요청이 명세와 어긋났을 가능성이 커서 찾기 쉽게 warning
+        log.warning("할 일 등록 거절: HTTP %d %s", e.code, code)
         return RegisterResult(REJECTED, error_code=code)
