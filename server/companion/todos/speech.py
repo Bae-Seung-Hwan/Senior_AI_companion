@@ -42,6 +42,8 @@ def time_phrase(t: dt.time) -> str:
     h, m = t.hour, t.minute
     if h == 0:
         head = "밤 12시"
+    elif h <= 5:
+        head = f"새벽 {h}시"  # "오전 3시"보다 어르신께 자연스러움
     elif h < 12:
         head = f"오전 {h}시"
     elif h == 12:
@@ -88,9 +90,10 @@ def ask_time_question(draft: TodoDraft) -> str:
 
 def registered(draft: TodoDraft, today: dt.date, next_at: str | None) -> str:
     """B 응답(명세 1)을 받은 뒤 확인 멘트."""
-    if next_at is None:
-        return f"{draft.title}, 등록해 두었어요. 시간이 정해지면 말씀해 주세요."
     text = f"{describe(draft, today)}, 등록해 두었어요."
+    if next_at is None:
+        # 명세 1에 수정 API가 없어서 "시간이 정해지면 말씀해 주세요"라고 하면 할 일이 두 개가 됨 (#68 안건)
+        return f"{text} 시간을 몰라서 알림은 따로 드리지 않을게요."
     if draft.time is None:
         # time_hint는 B가 사용자별 기본 시각으로 바꿈 → 실제로 알릴 시각을 알려 드림
         at = dt.datetime.fromisoformat(next_at)
@@ -104,8 +107,9 @@ def declined() -> str:
     return "알겠어요, 등록하지 않을게요."
 
 
-def ask_again() -> str:
-    return "등록해 드릴까요? 네, 아니요로 말씀해 주세요."
+def ask_again(draft: TodoDraft, today: dt.date) -> str:
+    """못 알아들었거나 되물으셨을 때. 내용을 못 들으셨을 수 있으니 다시 읽어 드린다."""
+    return f"{describe(draft, today)}, 등록해 드릴까요? 네, 아니요로 말씀해 주세요."
 
 
 def already_registered(draft: TodoDraft) -> str:

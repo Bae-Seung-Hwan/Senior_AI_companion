@@ -93,6 +93,15 @@ class TodoConversation:
 
     def _on_confirm_answer(self, text: str, message_id: str | None) -> str | None:
         answer = parse_yes_no(text)
+        collected = False
+        fixed = self._corrected(text, answer)
+        if fixed is not None:
+            # "아니, 아침 여섯 시" → 시각만 바로잡은 것. 같은 말에 다른 할 일이 없으면 고친 모양으로 다시 확인
+            collected = True
+            if self._collect(text, message_id, skip_title=self.current.title) == 0:
+                self.current = fixed
+                self.unclear_count = 0
+                return speech.confirm_question(fixed, self.today)
         if answer == YES:
             reply = self._register(self.current)
             nxt = self._next()
@@ -101,29 +110,54 @@ class TodoConversation:
             self._settle()
             nxt = self._next()
             return f"{speech.declined()} {nxt}" if nxt else speech.declined()
-        # 네/아니요가 아님. 그 말에 새 할 일이 있을 수 있으니 뽑아서 뒤에 줄 세운다
-        self._collect(text, message_id)
+        # 네/아니요가 아님 ("네?"처럼 되물은 것 포함). 그 말에 새 할 일이 있을 수 있으니 뽑아서 뒤에 줄 세운다
+        if not collected:
+            self._collect(text, message_id)
         if self.unclear_count == 0:
             self.unclear_count = 1
-            return speech.ask_again()
+            return speech.ask_again(self.current, self.today)
         # 두 번 알아듣지 못하면 이 할 일은 등록하지 않고 접는다 (끝난 것으로 치지 않음)
         return self._next()
 
     # --- 도우미 ---
 
-    def _collect(self, text: str, message_id: str | None):
-        """발화에서 할 일을 뽑아 대기열에 넣는다. 끝났거나 이미 기다리는 것은 뺀다."""
+    def _corrected(self, text: str, answer: str | None) -> TodoDraft | None:
+        """확인 질문에 시각을 바로잡아 대답했으면 고친 할 일을, 아니면 None.
+
+        1~6시를 오후로 읽는 규칙은 여기서 바로잡을 수 있어야 안전하다 ("아니, 아침 여섯 시").
+        "네, 저녁 혈압약 맞아요"처럼 제목에 든 때 낱말을 정정으로 보지 않으려고, 동의했으면 정확한 시각만 본다.
+        """
+        parsed = parse_time_answer(text)
+        draft = self.current
+        if isinstance(parsed, dt.time):
+            if parsed != draft.time:
+                return replace(draft, time=parsed, time_hint=None)
+        elif parsed not in (None, UNKNOWN_TIME) and answer != YES:
+            if draft.time is not None or parsed != draft.time_hint:
+                return replace(draft, time=None, time_hint=parsed)
+        return None
+
+    def _collect(self, text: str, message_id: str | None, skip_title: str | None = None) -> int:
+        """발화에서 할 일을 뽑아 대기열에 넣고, 넣은 개수를 돌려준다. 끝났거나 이미 기다리는 것은 뺀다.
+
+        skip_title: 시각을 바로잡는 말이면 추출기가 같은 할 일을 다시 뽑을 수 있어서, 그 제목은 넣지 않는다.
+        """
         try:
             drafts = self.extractor.extract(text, self.today, message_id=message_id, recent=tuple(self.recent))
         except ExtractionError:
-            return  # 할 일 제안만 건너뛰고 대화는 계속
+            return 0  # 할 일 제안만 건너뛰고 대화는 계속
         waiting = {d.key for d in self.queue} | {self.current_origin_key}
         if self.current is not None:
             waiting.add(self.current.key)
+        added = 0
         for draft in drafts:
+            if draft.title == skip_title:
+                continue
             if draft.key not in self.settled and draft.key not in waiting:
                 waiting.add(draft.key)
                 self.queue.append(draft)
+                added += 1
+        return added
 
     def _settle(self):
         """지금 할 일을 끝난 것으로 기록 (처음 뽑은 모양과 시각을 채운 모양 둘 다)."""
@@ -160,8 +194,7 @@ class TodoConversation:
         if result.status == DUPLICATE:
             self._settle()
             return speech.already_registered(draft)
-        if result.status == REJECTED:
-            log.info("할 일 등록 거절: %s", result.error_code)
+        if result.status == REJECTED:  # 로그는 b_client가 남김 (A 요청 버그일 가능성이 커서 warning)
             return speech.invalid_date() if result.error_code == "INVALID_DATE" else speech.try_again()
         if result.status == USER_NOT_FOUND:
             log.error("할 일 등록: 사용자 없음 (%s)", self.user_id)

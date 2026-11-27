@@ -98,7 +98,7 @@ class FlowTest(unittest.TestCase):
         c = conversation(FakeExtractor([BANK]), api)
         c.handle("…")
         self.assertEqual(c.handle("아직 몰라요"), "모레 은행 가기, 등록해 드릴까요?")
-        self.assertEqual(c.handle("네"), "은행 가기, 등록해 두었어요. 시간이 정해지면 말씀해 주세요.")
+        self.assertEqual(c.handle("네"), "모레 은행 가기, 등록해 두었어요. 시간을 몰라서 알림은 따로 드리지 않을게요.")
         self.assertEqual((api.bodies[0]["time"], api.bodies[0]["time_hint"]), (None, None))
 
     def test_대략적인_때로_대답(self):
@@ -123,7 +123,7 @@ class FlowTest(unittest.TestCase):
         ex = FakeExtractor([DENTIST], [])
         c = conversation(ex, api)
         c.handle("…")
-        self.assertEqual(c.handle("음..."), "등록해 드릴까요? 네, 아니요로 말씀해 주세요.")
+        self.assertEqual(c.handle("음..."), "내일 오후 3시 반 치과 예약, 등록해 드릴까요? 네, 아니요로 말씀해 주세요.")
         self.assertIsNone(c.handle("손주가 왔어요"))  # 다른 이야기 → 일반 대화로
         self.assertEqual(ex.calls[-1], "손주가 왔어요")
         self.assertEqual(api.bodies, [])
@@ -157,10 +157,6 @@ class FlowTest(unittest.TestCase):
         body = api.bodies[0]
         self.assertEqual((body["date"], body["time"], body["time_hint"], body["repeat"]),
                          (None, None, "morning", {"freq": "daily"}))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ReviewFixTest(unittest.TestCase):
@@ -204,7 +200,7 @@ class ReviewFixTest(unittest.TestCase):
         api = FakeApi()
         c = conversation(FakeExtractor([DENTIST], [BANK]), api)
         c.handle("…")
-        self.assertEqual(c.handle("아 그리고 모레 은행 가야 해"), "등록해 드릴까요? 네, 아니요로 말씀해 주세요.")
+        self.assertEqual(c.handle("아 그리고 모레 은행 가야 해"), "내일 오후 3시 반 치과 예약, 등록해 드릴까요? 네, 아니요로 말씀해 주세요.")
         self.assertEqual(c.handle("네"),
                          "내일 오후 3시 반 치과 예약, 등록해 두었어요. 은행 가기는 몇 시로 알려 드릴까요?")
 
@@ -220,3 +216,76 @@ class ReviewFixTest(unittest.TestCase):
         c.handle("…")
         self.assertEqual(c.handle("그래도 안 할래요"), "알겠어요, 등록하지 않을게요.")
         self.assertEqual(api.bodies, [])
+
+
+MEDS = TodoDraft("task", "약 타러 가기", "내일 6시에 약 타러 가야 해",
+                 date=dt.date(2026, 11, 25), time=dt.time(18, 0), message_id="m_1")
+
+
+class SecondReviewTest(unittest.TestCase):
+    """두 번째 코드 리뷰 (#72): 되묻기, 확인 질문에서 시각 바로잡기."""
+
+    def test_되물으면_등록하지_않고_내용을_다시_읽음(self):
+        for text in ("네?", "네? 뭐라고요?", "예? 다시 말해 줘", "어? 뭐라고?", "응?", "뭐라고요", "잘 못 들었어요"):
+            api = FakeApi()
+            c = conversation(FakeExtractor([DENTIST]), api)
+            c.handle("…")
+            self.assertEqual(c.handle(text),
+                             "내일 오후 3시 반 치과 예약, 등록해 드릴까요? 네, 아니요로 말씀해 주세요.", text)
+            self.assertEqual(api.bodies, [], text)
+            self.assertEqual(c.handle("네"), "내일 오후 3시 반 치과 예약, 등록해 두었어요.", text)
+
+    def test_확인_질문에서_시각을_바로잡음(self):
+        api = FakeApi()
+        c = conversation(FakeExtractor([MEDS]), api)
+        self.assertEqual(c.handle("내일 6시에 약 타러 가야 해"), "내일 오후 6시 약 타러 가기, 등록해 드릴까요?")
+        self.assertEqual(c.handle("아니 아침 여섯 시"), "내일 오전 6시 약 타러 가기, 등록해 드릴까요?")
+        self.assertEqual(api.bodies, [])
+        self.assertEqual(c.handle("네"), "내일 오전 6시 약 타러 가기, 등록해 두었어요.")
+        self.assertEqual(api.bodies[0]["time"], "06:00")
+
+    def test_네_없이_시각만_말해도_바로잡음(self):
+        c = conversation(FakeExtractor([MEDS]))
+        c.handle("…")
+        self.assertEqual(c.handle("새벽 다섯 시 반"), "내일 새벽 5시 반 약 타러 가기, 등록해 드릴까요?")
+
+    def test_바로잡을_때_추출기가_같은_할_일을_다시_뽑아도_하나만(self):
+        fixed = replace(MEDS, time=dt.time(6, 0))
+        api = FakeApi()
+        c = conversation(FakeExtractor([MEDS], [fixed]), api)
+        c.handle("…")
+        self.assertEqual(c.handle("아니 아침 여섯 시"), "내일 오전 6시 약 타러 가기, 등록해 드릴까요?")
+        self.assertEqual(c.handle("네"), "내일 오전 6시 약 타러 가기, 등록해 두었어요.")  # 다시 묻지 않음
+        self.assertEqual(len(api.bodies), 1)
+
+    def test_바로잡은_뒤_거절하면_처음_말을_다시_해도_제안하지_않음(self):
+        c = conversation(FakeExtractor([MEDS], [], [MEDS]))
+        c.handle("…")
+        c.handle("아니 아침 여섯 시")
+        self.assertEqual(c.handle("아니요"), "알겠어요, 등록하지 않을게요.")
+        self.assertIsNone(c.handle("내일 6시에 약 타러 가야 해"))
+
+    def test_같은_시각이면_바로잡기가_아님(self):
+        api = FakeApi()
+        c = conversation(FakeExtractor([DENTIST]), api)
+        c.handle("…")
+        self.assertEqual(c.handle("네, 세 시 반 맞아요"), "내일 오후 3시 반 치과 예약, 등록해 두었어요.")
+
+    def test_동의하면서_제목의_때_낱말은_바로잡기로_보지_않음(self):
+        evening = TodoDraft("medication", "저녁 혈압약", "…", time=dt.time(19, 0), repeat=Repeat("daily"))
+        c = conversation(FakeExtractor([evening]))
+        c.handle("…")
+        self.assertEqual(c.handle("네 저녁 혈압약 맞아"), "매일 오후 7시 저녁 혈압약, 등록해 두었어요.")
+
+    def test_확인_중_다른_할_일의_시각은_바로잡기가_아님(self):
+        hospital = TodoDraft("appointment", "병원", "…", date=dt.date(2026, 11, 26), time=dt.time(15, 0))
+        c = conversation(FakeExtractor([DENTIST], [hospital]))
+        c.handle("…")
+        self.assertEqual(c.handle("그리고 모레 3시에 병원"),
+                         "내일 오후 3시 반 치과 예약, 등록해 드릴까요? 네, 아니요로 말씀해 주세요.")
+        self.assertEqual(c.handle("네"),
+                         "내일 오후 3시 반 치과 예약, 등록해 두었어요. 모레 오후 3시 병원, 등록해 드릴까요?")
+
+
+if __name__ == "__main__":
+    unittest.main()

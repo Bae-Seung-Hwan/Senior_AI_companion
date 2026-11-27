@@ -25,6 +25,20 @@ class YesNoTest(unittest.TestCase):
         self.assertIsNone(parse_yes_no("그래도 좀..."))
         self.assertEqual(parse_yes_no("그래요"), YES)
 
+    def test_겹쳐_말해도_동의(self):
+        for text in ("네네", "예예", "응응", "네네 해 주세요", "넵"):
+            self.assertEqual(parse_yes_no(text), YES, text)
+
+    def test_되묻는_말은_동의가_아님(self):
+        for text in ("네?", "네? 뭐라고요?", "어? 뭐라고?", "예? 다시 말해 줘", "응?", "뭐라고요", "잘 안 들려요",
+                     "못 들었어요", "네 뭐라고요"):  # 마지막은 STT가 물음표를 빼먹은 경우
+            self.assertIsNone(parse_yes_no(text), text)
+
+    def test_잊지_말고는_거절이_아님(self):
+        for text in ("네 잊지 말고 꼭 알려 줘", "까먹지 말고 알려 줘요", "응 잊지 마"):
+            self.assertEqual(parse_yes_no(text), YES, text)
+        self.assertEqual(parse_yes_no("하지 말고 그냥 둬"), NO)
+
     def test_unclear(self):
         for text in ("", "음...", "어제 병원 갔다 왔어", "손주가 왔어요"):
             self.assertIsNone(parse_yes_no(text), text)
@@ -91,6 +105,8 @@ class SpeechTest(unittest.TestCase):
         self.assertEqual(speech.time_phrase(dt.time(0, 0)), "밤 12시")
         self.assertEqual(speech.time_phrase(dt.time(12, 0)), "낮 12시")
         self.assertEqual(speech.time_phrase(dt.time(9, 5)), "오전 9시 5분")
+        self.assertEqual(speech.time_phrase(dt.time(3, 30)), "새벽 3시 반")
+        self.assertEqual(speech.time_phrase(dt.time(6, 0)), "오전 6시")
 
     def test_topic_particle(self):
         self.assertEqual(speech.topic("치과 예약"), "치과 예약은")
@@ -106,7 +122,7 @@ class SpeechTest(unittest.TestCase):
         self.assertEqual(speech.registered(m, TODAY, "2026-11-24T23:00:00+00:00"),
                          "매일 아침 혈압약, 등록해 두었어요. 오전 8시에 알려 드릴게요.")
         self.assertEqual(speech.registered(m, TODAY, None),
-                         "혈압약, 등록해 두었어요. 시간이 정해지면 말씀해 주세요.")
+                         "매일 아침 혈압약, 등록해 두었어요. 시간을 몰라서 알림은 따로 드리지 않을게요.")
 
 
 if __name__ == "__main__":
