@@ -7,6 +7,7 @@ Python 3.10 이상만 있으면 되고, 설치할 것은 없습니다. 데이터
 | mock | 명세 | 이슈 | 기본 주소 |
 | --- | --- | --- | --- |
 | [todo_mock.py](todo_mock.py) | 1. 할 일 등록 | #45 | `http://127.0.0.1:8045` |
+| [meetup_mock.py](meetup_mock.py) | 2. 취미·관심사 반영 + 5. 모임 목록 조회 | #53, #57 | `http://127.0.0.1:8057` |
 | [report_mock.py](report_mock.py) | 3. 하루 요약 | #48 | `http://127.0.0.1:8048` |
 | [alert_mock.py](alert_mock.py) | 4. 긴급 알림 | #49 | `http://127.0.0.1:8049` |
 | [user_mock.py](user_mock.py) | 6. 대화 사용량 + 7. 사용자·공유 범위 | #58, #42 | `http://127.0.0.1:8042` |
@@ -15,6 +16,10 @@ Python 3.10 이상만 있으면 되고, 설치할 것은 없습니다. 데이터
 
 ```bash
 python tools/mocks/todo_mock.py
+```
+
+```bash
+python tools/mocks/meetup_mock.py
 ```
 
 ```bash
@@ -79,6 +84,121 @@ curl -X POST http://127.0.0.1:8045/todos -H "Content-Type: application/json" -d 
 - `GET /health`: 서버가 떠 있는지 확인
 - `X-Mock-Fail: 503` 헤더: 강제로 5xx 응답 → A의 재시도(같은 `request_id`로 최대 3번) 확인
 - `X-Mock-Delay: 3` 헤더: 3초 늦게 응답 → 시간 초과 처리 확인 (최대 30초, 숫자가 아니거나 음수면 무시)
+
+## 2·5. 취미·관심사 반영 + 모임 목록 조회 mock
+
+명세 2·5번 (PR #70 초안) 형식. 5번 추천이 2번으로 저장한 관심사를 쓰므로 한 서버에 같이 둡니다.
+관심사를 보내면 바로 추천 결과가 바뀌어서, "대화에서 취미가 나옴 → 저장 → 모임 추천" 흐름을 끝까지 볼 수 있습니다.
+
+### 2. 관심사 반영: `POST /interests`
+
+```bash
+curl -X POST http://127.0.0.1:8057/interests -H "Content-Type: application/json" -d '{
+  "request_id": "f6a7b8c9-d0e1-4f2a-8b3c-4d5e6f7a8b90",
+  "user_id": "u_123",
+  "interests": [
+    { "name": "등산", "original_text": "요즘 주말마다 친구들이랑 뒷산에 올라가요",
+      "source": { "conversation_id": "c_456", "message_id": "m_812" } },
+    { "name": "노래교실", "original_text": "노래교실은 요즘도 화요일마다 가요",
+      "source": { "conversation_id": "c_456", "message_id": "m_815" } }
+  ]
+}'
+```
+
+```json
+{
+  "user_id": "u_123",
+  "results": [
+    { "name": "등산", "status": "added" },
+    { "name": "노래교실", "status": "recently_removed" }
+  ],
+  "interests": [
+    { "name": "서예", "source": "manual", "added_at": "2026-11-20T19:10:00+09:00" },
+    { "name": "등산", "source": "voice", "added_at": "2026-11-24T10:20:00+09:00" }
+  ]
+}
+```
+
+| 상황 | 응답 |
+| --- | --- |
+| 새 이름 | `added` |
+| 이미 있음 (직접 추가한 것 포함), 한 요청 안의 두 번째 같은 이름 | `already_exists` |
+| 어르신이 90일 안에 지운 이름 | `recently_removed` (저장 안 함) |
+| 같은 `request_id` | `200` + 처음 결과 그대로 |
+| `interests`가 0개 또는 6개 이상 | `400 TOO_MANY_INTERESTS` |
+| 이름이 비었거나 20자 넘음 | `400 INVALID_INTEREST_NAME` |
+| `user_id`가 `u_unknown` | `404 USER_NOT_FOUND` |
+| 그 밖의 형식 오류 (빈 `original_text`, `source` 없음 등) | `400 INVALID_REQUEST` |
+
+- 이름은 앞뒤 공백만 지우고 **글자가 정확히 같을 때만** 같다고 봅니다 ("걷기" ≠ "산책")
+- 오류가 하나라도 있으면 아무것도 저장하지 않습니다
+- `original_text`는 응답에도 로그에도 나오지 않습니다
+
+### 5. 모임 목록 조회: `GET /meetups/recommendations`
+
+```bash
+curl "http://127.0.0.1:8057/meetups/recommendations?user_id=u_123&limit=3"
+curl "http://127.0.0.1:8057/meetups/recommendations?user_id=u_123&hobby=%EC%88%98%EC%A4%91%20%EA%B1%B7%EA%B8%B0"   # hobby=수중 걷기
+```
+
+```json
+{
+  "user_id": "u_123",
+  "meetups": [
+    {
+      "meetup_id": "mt_15",
+      "title": "붓글씨 함께 써요",
+      "hobby": "서예",
+      "place_name": "역삼도서관 1층 문화교실",
+      "region_name": "서울 강남구 역삼1동",
+      "starts_at": "2026-12-01T14:00:00+09:00",
+      "capacity": 10,
+      "joined_count": 3,
+      "match_reason": "관심사: 서예"
+    }
+  ],
+  "empty_reason": null
+}
+```
+
+모임 시각은 **서버를 켠 날 기준**으로 한 번만 만들어집니다 (위 예시는 11/24에 켠 경우).
+서버를 며칠 켜 두면 추천 모임이 기간 밖으로 빠지는 등 결과가 이상해지니, 그럴 땐 서버를 다시 켜세요.
+
+**들어 있는 모임** (모두 역삼1동 공공장소)
+
+| 모임 | 취미 | 추천에 |
+| --- | --- | --- |
+| `mt_12` 토요일 아침 뒷산 걷기 (4일 뒤) | 등산 | 나옴 |
+| `mt_15` 붓글씨 함께 써요 (7일 뒤) | 서예 | 나옴 |
+| `mt_16` 물속에서 천천히 걷기 (5일 뒤) | 수중 걷기 | 나옴 |
+| `mt_17` 복지관 바둑 한 판 (3일 뒤) | 바둑 | 나옴 |
+| `mt_20` ~ `mt_29` | 등산·서예 | **빠짐**: 자리 없음, 정지된 주최자, 차단 관계(`u_123`이 차단한 `u_666`이 참여), 다른 동네, 1시간 안에 시작, 14일 넘게 남음, 내가 연 모임, 이미 참여, 모집 마감, 탈퇴한 주최자 |
+
+| 테스트용 `user_id` | 내용 |
+| --- | --- |
+| `u_123` | 관심사 서예(직접 추가), 노래교실은 최근에 지움 → 처음엔 `mt_15`만 나옴 |
+| `u_no_region` | `empty_reason: "no_region"` |
+| `u_unknown` | `404 USER_NOT_FOUND` |
+| 그 밖의 아무 `user_id` | 관심사 없음 → `empty_reason: "no_interest"`. `POST /interests`로 넣으면 바로 추천됨 |
+
+- `hobby`를 보내면 저장된 관심사 대신 그 이름으로 찾고, `match_reason`은 `"대화에서 나온 활동: …"`
+- 맞는 모임이 없으면 `meetups: []` + `empty_reason: "no_match"`
+- 빈 결과일 때 `empty_reason`은 `no_region` → `no_interest` → `no_match` 순서로 먼저 맞는 하나 (동네가 없으면 관심사가 있어도 `no_region`). 빈 결과도 `200`
+- 주최자 정보, 참여자 명단, 모임 설명, 주소·좌표, 차단 때문에 뺐다는 사실은 응답에 없습니다
+- `limit`이 1~10이 아니거나 `user_id`가 없으면 `400 INVALID_REQUEST`
+
+> **mock에서 임시로 정한 것** (#70에서 확정되면 맞춰 고칩니다)
+>
+> - 모든 사용자의 동네는 역삼1동 (`u_no_region` 제외)
+> - 관심사 반영은 모두 `200` (새로 저장한 것이 있어도)
+> - 관심사와 모임 취미는 글자가 같을 때만 맞음 (표준 취미 목록은 회의 후)
+
+### 확인·테스트용 (mock 전용, 실제 서버에는 없음)
+
+- `GET /mock/interests/{user_id}`: 관심사 전체 (지운 것과 `removed_at` 포함)
+- `POST /mock/interests/{user_id}/remove` + `{"name": "서예"}`: 어르신이 화면에서 지운 것처럼. 이후 대화로 보내면 `recently_removed`
+- `GET /mock/meetups?user_id=u_123`: 모임 전체와 `excluded_because`(그 사용자에게 추천에서 빠지는 이유)
+- `GET /health`, `X-Mock-Fail`, `X-Mock-Delay`: 1번 mock과 같음 (GET에도 됨)
 
 ## 3. 하루 요약 mock
 
@@ -412,4 +532,4 @@ python -m unittest discover tools/mocks
 
 ## 개인정보
 
-서버 로그에는 경로와 상태 코드만 남기고, 대화 원문(`original_text`, `evidence.text`)과 요약 문장(`sections`)은 남기지 않습니다.
+서버 로그에는 경로와 상태 코드만 남기고, 대화 원문(`original_text`, `evidence.text`)과 요약 문장(`sections`)은 남기지 않습니다. 관심사의 `original_text`는 응답에도 넣지 않습니다.
