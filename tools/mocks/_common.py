@@ -123,7 +123,7 @@ class MockHandler(BaseHTTPRequestHandler):
         try:
             if method == "GET" and url.path == "/health":
                 return self._send(200, {"ok": True})
-            if method != "GET" and self._mock_headers():
+            if self._mock_headers():  # GET도 (명세 6-1 실패·시간 초과 확인)
                 return
             body = self._read_json() if method != "GET" else None
             status, resp = self.route(method, url.path, parse_qs(url.query), body)
@@ -152,11 +152,22 @@ class MockHandler(BaseHTTPRequestHandler):
         print(f"[{self.log_name}] {self.command} {self.path} → {args[1] if len(args) > 1 else ''}")
 
 
-def run(handler_cls, description, default_port, label):
+def run(handler, description, default_port, label, *, add_arguments=None, handler_factory=None):
+    """mock 서버 실행.
+
+    handler: Handler 클래스. 옵션이 필요 없는 mock은 이것만 준다.
+    add_arguments(ap): --host·--port 말고 옵션을 더 붙이는 함수 (선택)
+    handler_factory(args): 옵션 값으로 Handler 클래스를 만드는 함수. 이걸 쓰면 handler는 None으로 준다.
+    """
+    if (handler is None) == (handler_factory is None):
+        raise TypeError("handler(클래스)와 handler_factory(args → 클래스) 중 하나만 주세요")
     ap = argparse.ArgumentParser(description=description)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=default_port)
+    if add_arguments:
+        add_arguments(ap)
     args = ap.parse_args()
+    handler_cls = handler_factory(args) if handler_factory else handler
     server = ThreadingHTTPServer((args.host, args.port), handler_cls)
     print(f"{label} 실행 중: http://{args.host}:{args.port}  (끄려면 Ctrl+C)")
     try:
