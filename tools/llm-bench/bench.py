@@ -49,13 +49,13 @@ EXTRACT_SYSTEM = """어르신의 발화에서 정보를 뽑아 JSON 하나만 �
 
 
 def build_stream(client, model, system, messages, effort):
-    kwargs = dict(
-        model=model,
-        max_tokens=2048,
-        system=system,
-        messages=messages,
-        output_config={"effort": effort},
-    )
+    kwargs = {
+        "model": model,
+        "max_tokens": 2048,
+        "system": system,
+        "messages": messages,
+        "output_config": {"effort": effort},
+    }
     if model in FALLBACK_MODELS:
         return client.beta.messages.stream(
             betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs

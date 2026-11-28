@@ -61,6 +61,8 @@ jobs:
         run: |
           find tools -name '*.json' -not -path '*/results/*' -print0 \
             | xargs -0 -n1 python -m json.tool --no-ensure-ascii > /dev/null
+      - name: mock 테스트
+        run: python -m unittest discover tools/mocks
 
   # 기술 스택(#1) 확정 후 채운다. app/ 폴더가 생기기 전에는 건너뛴다
   app:
